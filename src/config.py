@@ -24,9 +24,10 @@ class Config:
     
     # Session memory types
     MEMORY_TYPES = [
+        "knowledge_base",     # Global/session-scoped shared knowledge (NEW)
         "session_context",    # Agent session snapshots for continuity
         "input_prompt",       # Original user prompts to prevent loss
-        "reports",           # Agent-generated analysis and findings  
+        "reports",           # Agent-generated analysis and findings
         "working_memory",    # Important info during task execution
         "system_memory",     # System configs, commands, scripts
         "report_observations" # Additional notes on existing reports
@@ -46,6 +47,11 @@ class Config:
     MAX_TAGS_PER_MEMORY = 20         # Increased for better categorization
     MAX_CHUNK_SIZE = 2000
     MAX_CHUNKS_PER_DOCUMENT = 1000   # Increased for large reports
+
+    # Chunking configuration (for document chunking feature)
+    DEFAULT_CHUNK_SIZE = 800
+    DEFAULT_CHUNK_OVERLAP = 80
+    MIN_CHUNK_SIZE = 250
     
     # Session configuration
     DEFAULT_SESSION_ITER = 1

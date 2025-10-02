@@ -3,10 +3,11 @@
 # /// script
 # dependencies = [
 #     "mcp>=0.3.0",
-#     "sqlite-vec>=0.1.6", 
+#     "sqlite-vec>=0.1.6",
 #     "sentence-transformers>=2.2.2",
 #     "tiktoken>=0.5.0",
-#     "pyyaml>=6.0"
+#     "pyyaml>=6.0",
+#     "langchain-text-splitters>=0.3.0"
 # ]
 # requires-python = ">=3.8"
 # ///
@@ -242,11 +243,12 @@ def store_report(
     title: str = None,
     description: str = None,
     tags: list[str] = None,
-    metadata: dict = None
+    metadata: dict = None,
+    auto_chunk: bool = True
 ) -> dict[str, Any]:
     """
     Store agent reports (usually MD files produced at end of task).
-    
+
     Args:
         agent_id: Agent identifier (required)
         session_id: Session identifier (required)
@@ -257,7 +259,8 @@ def store_report(
         description: Brief description
         tags: List of relevant tags
         metadata: Additional metadata
-        
+        auto_chunk: Enable automatic document chunking (default: True for reports)
+
     Returns:
         Dict with success status and memory details
     """
@@ -271,7 +274,53 @@ def store_report(
         title=title,
         description=description,
         tags=tags or [],
-        metadata=metadata or {}
+        metadata=metadata or {},
+        auto_chunk=auto_chunk
+    )
+
+@mcp.tool()
+def store_knowledge_base(
+    agent_id: str,
+    session_id: str,
+    content: str,
+    session_iter: int = 1,
+    task_code: str = None,
+    title: str = None,
+    description: str = None,
+    tags: list[str] = None,
+    metadata: dict = None,
+    auto_chunk: bool = True
+) -> dict[str, Any]:
+    """
+    Store knowledge base documents (long-term reference material, documentation, guides).
+
+    Args:
+        agent_id: Agent identifier (required)
+        session_id: Session identifier (required)
+        content: Knowledge base content (markdown, text, etc.)
+        session_iter: Session iteration number (optional)
+        task_code: Task identifier (optional)
+        title: Document title
+        description: Brief description
+        tags: List of relevant tags
+        metadata: Additional metadata
+        auto_chunk: Enable automatic document chunking (default: True for knowledge_base)
+
+    Returns:
+        Dict with success status and memory details
+    """
+    return store.store_memory(
+        memory_type="knowledge_base",
+        agent_id=agent_id,
+        session_id=session_id,
+        content=content,
+        session_iter=session_iter,
+        task_code=task_code,
+        title=title,
+        description=description,
+        tags=tags or [],
+        metadata=metadata or {},
+        auto_chunk=auto_chunk
     )
 
 @mcp.tool()
@@ -475,6 +524,46 @@ def search_reports(
     )
 
 @mcp.tool()
+def search_knowledge_base(
+    agent_id: str = None,
+    session_id: str = None,
+    session_iter: int = None,
+    task_code: str = None,
+    query: str = None,
+    limit: int = 10,
+    latest_first: bool = True,
+    similarity_threshold: float = 0.80
+) -> dict[str, Any]:
+    """
+    Search knowledge base documents with proper scoping and ordering.
+
+    Args:
+        agent_id: Filter by agent ID (optional)
+        session_id: Filter by session ID (optional)
+        session_iter: Filter by specific iteration (optional)
+        task_code: Filter by task code (optional)
+        query: Semantic search query (optional)
+        limit: Maximum results (default: 10)
+        latest_first: Order by latest iteration/creation first (default: True)
+        similarity_threshold: Minimum similarity score for results (default: 0.80)
+                            Higher = stricter filtering. Range: 0.0 to 1.0
+
+    Returns:
+        Dict with search results ordered by session_iter DESC, created_at DESC
+    """
+    return store.search_memories(
+        memory_type="knowledge_base",
+        agent_id=agent_id,
+        session_id=session_id,
+        session_iter=session_iter,
+        task_code=task_code,
+        query=query,
+        limit=limit,
+        latest_first=latest_first,
+        similarity_threshold=similarity_threshold
+    )
+
+@mcp.tool()
 def search_working_memory(
     agent_id: str = None,
     session_id: str = None,
@@ -621,8 +710,51 @@ def list_sessions(
     """
     return store.list_sessions(agent_id, limit)
 
+@mcp.tool()
+def delete_memory(memory_id: int) -> dict[str, Any]:
+    """
+    Delete a memory and all associated data (embeddings, chunks).
+
+    Args:
+        memory_id: The ID of the memory to delete
+
+    Returns:
+        Dict with deletion status
+    """
+    return store.delete_memory(memory_id)
+
+@mcp.tool()
+def cleanup_old_memories(
+    older_than_days: int = 30,
+    memory_type: str = None
+) -> dict[str, Any]:
+    """
+    Clean up old memories older than specified days.
+
+    Args:
+        older_than_days: Delete memories older than this many days (default: 30)
+        memory_type: Optional memory type filter
+
+    Returns:
+        Dict with cleanup statistics
+    """
+    return store.cleanup_old_memories(older_than_days, memory_type)
+
+@mcp.tool()
+def reconstruct_document(memory_id: int) -> dict[str, Any]:
+    """
+    Reconstruct a document from its stored chunks.
+
+    Args:
+        memory_id: The ID of the parent memory to reconstruct
+
+    Returns:
+        Dict with reconstructed content and chunk info
+    """
+    return store.reconstruct_document(memory_id)
+
 # ======================
-# SERVER INITIALIZATION  
+# SERVER INITIALIZATION
 # ======================
 
 if __name__ == "__main__":

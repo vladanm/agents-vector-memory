@@ -9,9 +9,22 @@ ordering, and task continuity support.
 import sqlite3
 import sqlite_vec
 import json
+import re
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import List, Optional, Dict, Any, Tuple
+
+# DEBUG: Log module load
+with open("/tmp/vector_memory_debug.log", "a") as f:
+    f.write(f"\n{'='*60}\n")
+    f.write(f"session_memory_store.py LOADED at {datetime.now()}\n")
+    f.write(f"{'='*60}\n")
+
+try:
+    import yaml
+    YAML_AVAILABLE = True
+except ImportError:
+    YAML_AVAILABLE = False
 
 from .config import Config
 from .security import (
@@ -58,6 +71,8 @@ class SessionMemoryStore:
         conn.enable_load_extension(True)
         sqlite_vec.load(conn)
         conn.enable_load_extension(False)
+        # Enable foreign key constraints for CASCADE DELETE
+        conn.execute("PRAGMA foreign_keys = ON")
         return conn
     
     def _init_database(self) -> None:
@@ -99,13 +114,54 @@ class SessionMemoryStore:
             
             # Create vector search index
             conn.execute(f"""
-                CREATE VIRTUAL TABLE IF NOT EXISTS vec_session_search 
+                CREATE VIRTUAL TABLE IF NOT EXISTS vec_session_search
                 USING vec0(
                     memory_id INTEGER PRIMARY KEY,
                     embedding float[{Config.EMBEDDING_DIM}]
                 )
             """)
-            
+
+            # Create memory chunks table for document chunking support (NEW)
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS memory_chunks (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    parent_id INTEGER NOT NULL,
+                    chunk_index INTEGER NOT NULL,
+                    content TEXT NOT NULL,
+                    chunk_type TEXT DEFAULT 'text',
+                    start_char INTEGER,
+                    end_char INTEGER,
+                    token_count INTEGER,
+                    header_path TEXT,
+                    level INTEGER DEFAULT 0,
+                    prev_chunk_id INTEGER,
+                    next_chunk_id INTEGER,
+                    content_hash TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    FOREIGN KEY (parent_id) REFERENCES session_memories(id) ON DELETE CASCADE,
+                    UNIQUE(parent_id, chunk_index)
+                )
+            """)
+
+            # Create chunk embeddings table for semantic search on chunks
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS chunk_embeddings (
+                    id INTEGER PRIMARY KEY,
+                    chunk_id INTEGER NOT NULL,
+                    embedding BLOB NOT NULL,
+                    FOREIGN KEY (chunk_id) REFERENCES memory_chunks(id) ON DELETE CASCADE
+                )
+            """)
+
+            # Create vector search index for chunks
+            conn.execute(f"""
+                CREATE VIRTUAL TABLE IF NOT EXISTS vec_chunk_search
+                USING vec0(
+                    chunk_id INTEGER PRIMARY KEY,
+                    embedding float[{Config.EMBEDDING_DIM}]
+                )
+            """)
+
             # Create indexes for efficient scoped searches
             conn.execute("CREATE INDEX IF NOT EXISTS idx_agent_session ON session_memories(agent_id, session_id)")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_agent_session_iter ON session_memories(agent_id, session_id, session_iter)")
@@ -121,7 +177,98 @@ class SessionMemoryStore:
             raise RuntimeError(f"Failed to initialize database: {e}")
         finally:
             conn.close()
-    
+
+    def _extract_yaml_frontmatter(self, content: str) -> Tuple[str, Dict[str, Any]]:
+        """
+        Extract YAML frontmatter from markdown content.
+
+        Args:
+            content: Content that may contain YAML frontmatter
+
+        Returns:
+            Tuple of (clean_content, frontmatter_dict)
+        """
+        frontmatter_pattern = r'^---\s*\n(.*?)\n---\s*\n'
+        match = re.match(frontmatter_pattern, content, re.DOTALL)
+
+        if match and YAML_AVAILABLE:
+            frontmatter_text = match.group(1)
+            try:
+                frontmatter_data = yaml.safe_load(frontmatter_text) or {}
+                clean_content = content[match.end():]
+                return clean_content, frontmatter_data
+            except Exception:
+                return content, {}
+        return content, {}
+
+    def _normalize_markdown(self, content: str) -> str:
+        """
+        Normalize markdown formatting for consistent storage.
+
+        Args:
+            content: Markdown content
+
+        Returns:
+            Normalized markdown content
+        """
+        # Remove excessive blank lines
+        content = re.sub(r'\n{3,}', '\n\n', content)
+
+        # Normalize header spacing
+        content = re.sub(r'(#{1,6})\s+', r'\1 ', content)
+
+        # Trim whitespace
+        content = content.strip()
+
+        return content
+
+    def _store_chunks(self, parent_id: int, chunks: List, conn: sqlite3.Connection) -> None:
+        """
+        Store document chunks with embeddings in the memory_chunks table.
+
+        Args:
+            parent_id: Parent memory ID
+            chunks: List of ChunkEntry objects
+            conn: Database connection
+        """
+        from .memory_types import ChunkEntry
+
+        now = datetime.now(timezone.utc).isoformat()
+
+        # Generate embeddings for all chunks at once (batch processing)
+        chunk_contents = [chunk.content for chunk in chunks]
+        embeddings = self.embedding_model.encode(chunk_contents)
+
+        for i, chunk in enumerate(chunks):
+            # Insert chunk
+            cursor = conn.execute("""
+                INSERT INTO memory_chunks (
+                    parent_id, chunk_index, content, chunk_type,
+                    start_char, end_char, token_count, header_path, level,
+                    prev_chunk_id, next_chunk_id, content_hash, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (
+                parent_id, chunk.chunk_index, chunk.content, chunk.chunk_type,
+                chunk.start_char, chunk.end_char, chunk.token_count,
+                chunk.header_path, chunk.level, chunk.prev_chunk_id,
+                chunk.next_chunk_id, chunk.content_hash, now
+            ))
+
+            chunk_id = cursor.lastrowid
+            embedding = embeddings[i]
+
+            # Store chunk embedding
+            conn.execute("""
+                INSERT INTO chunk_embeddings (chunk_id, embedding)
+                VALUES (?, ?)
+            """, (chunk_id, embedding.tobytes()))
+
+            # Store in vector search index
+            conn.execute("""
+                INSERT INTO vec_chunk_search (chunk_id, embedding)
+                VALUES (?, ?)
+            """, (chunk_id, embedding.tobytes()))
+
     def store_memory(
         self,
         memory_type: str,
@@ -133,11 +280,12 @@ class SessionMemoryStore:
         title: str = None,
         description: str = None,
         tags: List[str] = None,
-        metadata: Dict[str, Any] = None
+        metadata: Dict[str, Any] = None,
+        auto_chunk: bool = False
     ) -> Dict[str, Any]:
         """
-        Store memory with session scoping.
-        
+        Store memory with session scoping and optional document chunking.
+
         Args:
             memory_type: Type of memory (session_context, input_prompt, etc.)
             agent_id: Agent identifier ("main" or "specialized-agent")
@@ -149,7 +297,8 @@ class SessionMemoryStore:
             description: Brief description
             tags: List of tags
             metadata: Additional metadata
-            
+            auto_chunk: Enable automatic document chunking (default: False)
+
         Returns:
             Dict with success status and memory details
         """
@@ -215,10 +364,66 @@ class SessionMemoryStore:
                     INSERT INTO vec_session_search (memory_id, embedding)
                     VALUES (?, ?)
                 """, (memory_id, embedding.tobytes()))
-                
+
+                # Handle document chunking if enabled
+                chunk_count = 0
+
+                # DEBUG: Write to file
+                debug_log = "/tmp/vector_memory_debug.log"
+                with open(debug_log, "a") as f:
+                    f.write(f"\n=== store_memory called ===\n")
+                    f.write(f"memory_id: {memory_id}\n")
+                    f.write(f"auto_chunk: {auto_chunk}\n")
+                    f.write(f"memory_type: {memory_type}\n")
+                    f.write(f"content_length: {len(content)}\n")
+
+                if auto_chunk:
+                    with open(debug_log, "a") as f:
+                        f.write(f"ENTERING auto_chunk block!\n")
+                    try:
+                        from .chunking import DocumentChunker
+                        from .memory_types import get_memory_type_config
+
+                        # Get chunking config for memory type
+                        type_config = get_memory_type_config(memory_type)
+
+                        # Create chunker and process content
+                        chunker = DocumentChunker()
+                        chunk_metadata = {"memory_type": memory_type}
+                        if metadata:
+                            chunk_metadata.update(metadata)
+
+                        with open(debug_log, "a") as f:
+                            f.write(f"About to call chunk_document\n")
+                        chunks = chunker.chunk_document(content, memory_id, chunk_metadata)
+                        with open(debug_log, "a") as f:
+                            f.write(f"Chunking returned {len(chunks) if chunks else 0} chunks\n")
+
+                        # Store chunks
+                        if chunks:
+                            with open(debug_log, "a") as f:
+                                f.write(f"Storing {len(chunks)} chunks\n")
+                            self._store_chunks(memory_id, chunks, conn)
+                            chunk_count = len(chunks)
+                            with open(debug_log, "a") as f:
+                                f.write(f"Successfully stored {chunk_count} chunks\n")
+                        else:
+                            with open(debug_log, "a") as f:
+                                f.write(f"No chunks to store (chunks list empty)\n")
+
+                        # Cleanup chunker resources
+                        chunker.cleanup_chunks()
+
+                    except Exception as e:
+                        # Log warning but don't fail the entire operation
+                        import traceback
+                        with open(debug_log, "a") as f:
+                            f.write(f"EXCEPTION in chunking: {e}\n")
+                            f.write(traceback.format_exc())
+
                 conn.commit()
-                
-                return {
+
+                result = {
                     "success": True,
                     "memory_id": memory_id,
                     "memory_type": memory_type,
@@ -230,6 +435,11 @@ class SessionMemoryStore:
                     "created_at": now,
                     "message": f"Memory stored successfully with ID: {memory_id}"
                 }
+
+                if chunk_count > 0:
+                    result["chunks_stored"] = chunk_count
+
+                return result
                 
             except Exception as e:
                 conn.rollback()
@@ -312,39 +522,68 @@ class SessionMemoryStore:
             if query and query.strip():
                 # Generate query embedding for semantic search
                 query_embedding = self.embedding_model.encode([query.strip()])[0]
-                
-                # Execute vector search with proper LIMIT constraint
-                # sqlite-vec requires LIMIT on the vector search subquery
-                
+
                 # Build WHERE clause for the main query (not the subquery)
                 where_clause_main = where_clause.replace("WHERE ", "AND ") if where_clause else ""
-                
-                # Add vector search ordering
-                order_clause = "ORDER BY v.distance ASC"
-                if latest_first:
-                    order_clause = "ORDER BY m.session_iter DESC, m.created_at DESC, v.distance ASC"
-                
-                vector_query = f"""
-                    SELECT m.*, v.distance
+
+                distance_threshold = 1.8  # Allow semantic matches, filter out very dissimilar content
+
+                # Search both document embeddings and chunk embeddings
+                # 1. Search document embeddings
+                doc_vector_query = f"""
+                    SELECT m.*, v.distance, 'document' as source_type, NULL as chunk_index
                     FROM session_memories m
                     JOIN (
-                        SELECT memory_id, distance 
-                        FROM vec_session_search 
+                        SELECT memory_id, distance
+                        FROM vec_session_search
                         WHERE embedding MATCH ? AND k = ?
                         ORDER BY distance ASC
                     ) v ON m.id = v.memory_id
                     WHERE v.distance < ?
                     {where_clause_main}
-                    {order_clause}
                 """
-                
-                # Parameters: embedding, k (limit) for subquery, then similarity_threshold and additional params for main query
-                # In sqlite-vec: distance 0.0 = identical, distance 2.0+ = very different
-                # Based on testing, reasonable matches have distances around 1.1-1.5
-                # Use a permissive threshold that allows semantic matches while filtering noise
-                distance_threshold = 1.8  # Allow semantic matches, filter out very dissimilar content
-                final_params = [query_embedding.tobytes(), limit, distance_threshold] + params
-                rows = conn.execute(vector_query, final_params).fetchall()
+
+                # 2. Search chunk embeddings
+                # Return chunk content instead of parent content to avoid duplication
+                chunk_vector_query = f"""
+                    SELECT
+                        m.id, m.memory_type, m.agent_id, m.session_id,
+                        m.session_iter, m.task_code,
+                        mc.content as content,  -- Use chunk content, not parent content
+                        m.title, m.description, m.tags, m.metadata,
+                        m.content_hash, m.created_at, m.updated_at,
+                        m.accessed_at, m.access_count,
+                        v.distance, 'chunk' as source_type, mc.chunk_index
+                    FROM session_memories m
+                    JOIN memory_chunks mc ON m.id = mc.parent_id
+                    JOIN (
+                        SELECT chunk_id, distance
+                        FROM vec_chunk_search
+                        WHERE embedding MATCH ? AND k = ?
+                        ORDER BY distance ASC
+                    ) v ON mc.id = v.chunk_id
+                    WHERE v.distance < ?
+                    {where_clause_main}
+                """
+
+                # Combine both searches with UNION ALL
+                combined_query = f"""
+                    SELECT * FROM (
+                        {doc_vector_query}
+                        UNION ALL
+                        {chunk_vector_query}
+                    )
+                    ORDER BY distance ASC
+                    LIMIT ?
+                """
+
+                # Parameters: embedding, k, distance_threshold for both queries, then final limit
+                final_params = (
+                    [query_embedding.tobytes(), limit, distance_threshold] + params +
+                    [query_embedding.tobytes(), limit * 2, distance_threshold] + params +
+                    [limit]
+                )
+                rows = conn.execute(combined_query, final_params).fetchall()
                 
             else:
                 # Pure scoped search without semantic filtering
@@ -383,10 +622,28 @@ class SessionMemoryStore:
                     "updated_at": row[13],
                     "accessed_at": row[14],
                     "access_count": row[15],
-                    "similarity": 1.0 - row[16] if len(row) > 16 else 1.0  # Convert distance to similarity
+                    "similarity": max(0.0, 2.0 - row[16]) if len(row) > 16 else 1.0  # Convert distance to similarity (sqlite-vec L2 distance)
                 }
+
+                # Add source information if available (from semantic search)
+                if len(row) > 17:
+                    memory["source_type"] = row[17]  # 'document' or 'chunk'
+                    if row[18] is not None:  # chunk_index
+                        memory["chunk_index"] = row[18]
+
                 results.append(memory)
-            
+
+            # Filter results by similarity threshold (only for semantic search)
+            if query and query.strip():
+                # Filter out results with similarity below threshold
+                # Note: similarity = 2.0 - distance (sqlite-vec returns L2 distance)
+                # Lower distance = higher similarity
+                filtered_results = [
+                    result for result in results
+                    if result['similarity'] >= similarity_threshold
+                ]
+                results = filtered_results
+
             # Update access counts
             if results:
                 memory_ids = [r["id"] for r in results]
@@ -675,5 +932,214 @@ class SessionMemoryStore:
             return {
                 "success": False,
                 "error": "Session listing failed",
+                "message": str(e)
+            }
+
+    def reconstruct_document(self, memory_id: int) -> Dict[str, Any]:
+        """
+        Reconstruct a document from its chunks.
+
+        Args:
+            memory_id: The ID of the parent memory to reconstruct
+
+        Returns:
+            Dict with reconstructed content and chunk info
+        """
+        try:
+            conn = self._get_connection()
+
+            # Get the parent memory
+            parent = conn.execute("""
+                SELECT content, title, memory_type, created_at
+                FROM session_memories
+                WHERE id = ?
+            """, (memory_id,)).fetchone()
+
+            if not parent:
+                conn.close()
+                return {
+                    "success": False,
+                    "error": "Memory not found",
+                    "message": f"No memory found with ID: {memory_id}"
+                }
+
+            # Get all chunks for this memory
+            chunks = conn.execute("""
+                SELECT chunk_index, content, chunk_type, header_path, level
+                FROM memory_chunks
+                WHERE parent_id = ?
+                ORDER BY chunk_index ASC
+            """, (memory_id,)).fetchall()
+
+            conn.close()
+
+            if not chunks:
+                # No chunks, return original content
+                return {
+                    "success": True,
+                    "memory_id": memory_id,
+                    "content": parent[0],
+                    "title": parent[1],
+                    "memory_type": parent[2],
+                    "chunk_count": 0,
+                    "message": "No chunks found, returning original content"
+                }
+
+            # Reconstruct from chunks
+            reconstructed_parts = []
+            for chunk in chunks:
+                reconstructed_parts.append(chunk[1])  # content
+
+            reconstructed_content = '\n\n'.join(reconstructed_parts)
+
+            return {
+                "success": True,
+                "memory_id": memory_id,
+                "content": reconstructed_content,
+                "title": parent[1],
+                "memory_type": parent[2],
+                "chunk_count": len(chunks),
+                "message": f"Document reconstructed from {len(chunks)} chunks"
+            }
+
+        except Exception as e:
+            return {
+                "success": False,
+                "error": "Reconstruction failed",
+                "message": str(e)
+            }
+
+    def delete_memory(self, memory_id: int) -> Dict[str, Any]:
+        """
+        Delete a memory and all associated data.
+
+        Args:
+            memory_id: The ID of the memory to delete
+
+        Returns:
+            Dict with deletion status
+        """
+        try:
+            conn = self._get_connection()
+
+            # Check if memory exists
+            existing = conn.execute(
+                "SELECT memory_type FROM session_memories WHERE id = ?",
+                (memory_id,)
+            ).fetchone()
+
+            if not existing:
+                conn.close()
+                return {
+                    "success": False,
+                    "error": "Memory not found",
+                    "message": f"No memory found with ID: {memory_id}"
+                }
+
+            try:
+                # Delete from session_memories (cascades to embeddings, chunks)
+                conn.execute("DELETE FROM session_memories WHERE id = ?", (memory_id,))
+
+                # Delete from vector search index
+                conn.execute("DELETE FROM vec_session_search WHERE memory_id = ?", (memory_id,))
+
+                conn.commit()
+
+                return {
+                    "success": True,
+                    "memory_id": memory_id,
+                    "memory_type": existing[0],
+                    "message": f"Memory {memory_id} deleted successfully"
+                }
+
+            except Exception as e:
+                conn.rollback()
+                raise
+
+            finally:
+                conn.close()
+
+        except Exception as e:
+            return {
+                "success": False,
+                "error": "Deletion failed",
+                "message": str(e)
+            }
+
+    def cleanup_old_memories(self, older_than_days: int = 30, memory_type: str = None) -> Dict[str, Any]:
+        """
+        Clean up old memories older than specified days.
+
+        Args:
+            older_than_days: Delete memories older than this many days
+            memory_type: Optional memory type filter
+
+        Returns:
+            Dict with cleanup statistics
+        """
+        try:
+            from datetime import timedelta
+
+            cutoff_date = (datetime.now(timezone.utc) - timedelta(days=older_than_days)).isoformat()
+
+            conn = self._get_connection()
+
+            try:
+                # Build query
+                where_clause = "WHERE created_at < ?"
+                params = [cutoff_date]
+
+                if memory_type:
+                    where_clause += " AND memory_type = ?"
+                    params.append(memory_type)
+
+                # Get IDs to delete
+                rows = conn.execute(f"""
+                    SELECT id FROM session_memories {where_clause}
+                """, params).fetchall()
+
+                deleted_ids = [row[0] for row in rows]
+
+                if not deleted_ids:
+                    conn.close()
+                    return {
+                        "success": True,
+                        "deleted_count": 0,
+                        "message": "No old memories found to clean up"
+                    }
+
+                # Delete memories (cascades to embeddings and chunks)
+                conn.execute(f"""
+                    DELETE FROM session_memories {where_clause}
+                """, params)
+
+                # Delete from vector index
+                placeholders = ','.join(['?' for _ in deleted_ids])
+                conn.execute(f"""
+                    DELETE FROM vec_session_search WHERE memory_id IN ({placeholders})
+                """, deleted_ids)
+
+                conn.commit()
+
+                return {
+                    "success": True,
+                    "deleted_count": len(deleted_ids),
+                    "deleted_ids": deleted_ids,
+                    "cutoff_date": cutoff_date,
+                    "memory_type_filter": memory_type,
+                    "message": f"Cleaned up {len(deleted_ids)} old memories"
+                }
+
+            except Exception as e:
+                conn.rollback()
+                raise
+
+            finally:
+                conn.close()
+
+        except Exception as e:
+            return {
+                "success": False,
+                "error": "Cleanup failed",
                 "message": str(e)
             }
