@@ -37,6 +37,9 @@ class ChunkEntry:
     next_chunk_id: Optional[int] = None
     content_hash: str = ""
     id: Optional[int] = None
+    original_content: Optional[str] = None
+    is_contextually_enriched: bool = False
+    granularity_level: str = "medium"
 
 
 def get_memory_type_config(memory_type: str) -> Dict[str, Any]:
@@ -65,32 +68,32 @@ def get_memory_type_config(memory_type: str) -> Dict[str, Any]:
         "working_memory": {
             "chunk_size": 800,
             "chunk_overlap": 80,
-            "preserve_structure": False,
-            "default_auto_chunk": False
+            "preserve_structure": True,
+            "default_auto_chunk": True
         },
         "system_memory": {
             "chunk_size": 600,
             "chunk_overlap": 60,
             "preserve_structure": False,
-            "default_auto_chunk": False
+            "default_auto_chunk": True
         },
         "session_context": {
             "chunk_size": 1000,
             "chunk_overlap": 100,
             "preserve_structure": False,
-            "default_auto_chunk": False
+            "default_auto_chunk": True
         },
         "input_prompt": {
             "chunk_size": 500,
             "chunk_overlap": 50,
             "preserve_structure": False,
-            "default_auto_chunk": False
+            "default_auto_chunk": True
         },
         "report_observations": {
             "chunk_size": 800,
             "chunk_overlap": 80,
             "preserve_structure": False,
-            "default_auto_chunk": False
+            "default_auto_chunk": True
         }
     }
 

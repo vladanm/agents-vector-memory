@@ -89,7 +89,7 @@ class DocumentChunker:
         Args:
             content: Document content to chunk
             parent_id: Parent memory entry ID
-            metadata: Optional metadata with memory_type hint
+            metadata: Optional metadata with memory_type hint, title, enable_enrichment
 
         Returns:
             List of ChunkEntry objects
@@ -124,6 +124,12 @@ class DocumentChunker:
                 with open("/tmp/vector_memory_debug.log", "a") as f:
                     f.write("[CHUNK DEBUG] Using recursive chunking\n")
                 chunks = self._chunk_recursive(content, parent_id, chunk_size, chunk_overlap)
+
+            # Apply contextual enrichment if enabled (default for knowledge_base and reports)
+            enable_enrichment = metadata.get("enable_enrichment", memory_type in ["knowledge_base", "reports"])
+            if enable_enrichment and chunks:
+                document_title = metadata.get("title", "Untitled Document")
+                self._apply_contextual_enrichment(chunks, document_title, memory_type)
 
             self._active_chunks.extend(chunks)
             return chunks
@@ -299,6 +305,89 @@ class DocumentChunker:
                     f.write(f"[VALIDATE] WARNING: Code integrity below target: {integrity_score:.1%}\n")
 
         return splits
+
+    def _apply_contextual_enrichment(self, chunks: List[ChunkEntry], document_title: str, memory_type: str):
+        """
+        Apply contextual enrichment to all chunks in place.
+
+        Modifies chunk objects to add enriched content and preserve original.
+        """
+        total_chunks = len(chunks)
+
+        with open("/tmp/vector_memory_debug.log", "a") as f:
+            f.write(f"[ENRICH] Applying contextual enrichment to {total_chunks} chunks for '{document_title}'\n")
+
+        for chunk in chunks:
+            # Determine granularity based on token count
+            if chunk.token_count:
+                if chunk.token_count < 400:
+                    granularity = "fine"
+                elif chunk.token_count <= 1200:
+                    granularity = "medium"
+                else:
+                    granularity = "coarse"
+            else:
+                granularity = "medium"  # Default
+
+            # Enrich the chunk
+            enriched_content, original_content = self._enrich_chunk_with_context(
+                chunk_content=chunk.content,
+                document_title=document_title,
+                header_path=chunk.header_path or "",
+                chunk_index=chunk.chunk_index,
+                total_chunks=total_chunks,
+                memory_type=memory_type,
+                granularity_level=granularity
+            )
+
+            # Update chunk object
+            chunk.original_content = original_content
+            chunk.content = enriched_content  # content field gets enriched version for embedding
+            chunk.is_contextually_enriched = True
+            chunk.granularity_level = granularity  # Set granularity on chunk object
+
+    def _enrich_chunk_with_context(
+        self,
+        chunk_content: str,
+        document_title: str,
+        header_path: str,
+        chunk_index: int,
+        total_chunks: int,
+        memory_type: str,
+        granularity_level: str
+    ) -> tuple[str, str]:
+        """
+        Create contextual header for chunk embedding while preserving original for display.
+
+        Args:
+            chunk_content: Original chunk content
+            document_title: Parent document title
+            header_path: Section hierarchy path
+            chunk_index: Position in document (0-based)
+            total_chunks: Total number of chunks
+            memory_type: Type of memory (knowledge_base, reports, etc)
+            granularity_level: fine/medium/coarse
+
+        Returns:
+            tuple: (enriched_content_for_embedding, original_content_for_display)
+        """
+        # Calculate position ratio
+        position_ratio = (chunk_index + 1) / total_chunks if total_chunks > 0 else 0.5
+        position_desc = "beginning" if position_ratio < 0.33 else "middle" if position_ratio < 0.67 else "end"
+
+        # Build context header
+        context_parts = [
+            f"Document: {document_title}",
+            f"Section: {header_path or 'Main Content'}",
+            f"Position: Chunk {chunk_index + 1} of {total_chunks} ({position_desc}, {granularity_level} granularity)",
+            f"Type: {memory_type}",
+            "",  # Empty line separator
+        ]
+
+        context_header = "\n".join(context_parts)
+        enriched_content = context_header + chunk_content
+
+        return enriched_content, chunk_content
 
     def _enhance_code_metadata(self, content: str, base_metadata: Dict[str, Any],
                                token_count: int, chunk_size: int) -> Dict[str, Any]:

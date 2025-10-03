@@ -771,17 +771,19 @@ class SessionMemoryStore:
                 final_params = [query_embedding.tobytes(), limit * 2, distance_threshold] + params + [limit]
 
             else:
-                # Fine or medium: search ALL chunks (NO granularity_level filtering!)
-                # Granularity controls expansion behavior, not what we search
+                # Fine or medium: search chunks filtered by granularity_level
+                granularity_filter = f"AND mc.granularity_level = '{granularity}'"
 
                 vector_query = f"""
                     SELECT
                         m.id, m.memory_type, m.agent_id, m.session_id,
                         m.session_iter, m.task_code,
+                        m.content as content,
                         m.title, m.description, m.tags, m.metadata,
                         m.content_hash, m.created_at, m.updated_at,
                         m.accessed_at, m.access_count,
-                        v.distance, mc.chunk_index, mc.id as chunk_id,
+                        v.distance, 'chunk' as source_type,
+                        mc.chunk_index,
                         COALESCE(mc.original_content, mc.content) as chunk_content,
                         mc.header_path, mc.token_count, mc.sibling_count,
                         mc.section_hierarchy, mc.chunk_position_ratio
@@ -795,91 +797,55 @@ class SessionMemoryStore:
                     ) v ON mc.id = v.chunk_id
                     WHERE v.distance < ?
                     {where_clause_main}
+                    {granularity_filter}
                     ORDER BY v.distance ASC
                     LIMIT ?
                 """
-                final_params = [query_embedding.tobytes(), limit * 3, distance_threshold] + params + [limit * 2]
+                final_params = [query_embedding.tobytes(), limit * 2, distance_threshold] + params + [limit]
 
             rows = conn.execute(vector_query, final_params).fetchall()
 
-            # Handle coarse search (full documents)
-            if granularity == 'coarse':
-                results = []
-                for row in rows:
-                    # Column order from SELECT m.*, v.distance, 'document', NULL, NULL
-                    # m.*: id(0), memory_type(1), agent_id(2), session_id(3), session_iter(4),
-                    #      task_code(5), content(6), title(7), description(8), tags(9), metadata(10),
-                    #      content_hash(11), created_at(12), updated_at(13), accessed_at(14), access_count(15),
-                    #      document_summary(16), estimated_tokens(17), chunk_strategy(18)
-                    # Then: distance(19), source_type(20), chunk_index(21), chunk_content(22)
-                    result = {
-                        "memory_id": row[0],
-                        "memory_type": row[1],
-                        "agent_id": row[2],
-                        "session_id": row[3],
-                        "session_iter": row[4],
-                        "task_code": row[5],
-                        "content": row[6],  # Full document content
-                        "title": row[7],
-                        "description": row[8],
-                        "tags": json.loads(row[9]) if row[9] else [],
-                        "metadata": json.loads(row[10]) if row[10] else {},
-                        "content_hash": row[11],
-                        "created_at": row[12],
-                        "updated_at": row[13],
-                        "accessed_at": row[14],
-                        "access_count": row[15],
-                        "similarity": max(0.0, 2.0 - row[19]) if row[19] is not None else 0.0,
-                        "source_type": "document",
-                        "granularity": "coarse"
-                    }
-                    results.append(result)
-            else:
-                # Format matched chunks for fine/medium
-                matched_chunks = []
-                for row in rows:
-                    chunk = {
-                        "memory_id": row[0],
-                        "memory_type": row[1],
-                        "agent_id": row[2],
-                        "session_id": row[3],
-                        "session_iter": row[4],
-                        "task_code": row[5],
-                        "title": row[6],
-                        "description": row[7],
-                        "tags": json.loads(row[8]) if row[8] else [],
-                        "metadata": json.loads(row[9]) if row[9] else {},
-                        "content_hash": row[10],
-                        "created_at": row[11],
-                        "updated_at": row[12],
-                        "accessed_at": row[13],
-                        "access_count": row[14],
-                        "similarity": max(0.0, 2.0 - row[15]) if row[15] is not None else 0.0,
-                        "chunk_index": row[16],
-                        "chunk_id": row[17],
-                        "chunk_content": row[18],
-                        "header_path": row[19],
-                        "token_count": row[20],
-                        "sibling_count": row[21],
-                        "section_hierarchy": row[22],
-                        "chunk_position_ratio": row[23],
-                        "source_type": "chunk",
-                        "granularity": granularity
-                    }
-                    matched_chunks.append(chunk)
+            # Format results
+            results = []
+            for row in rows:
+                result = {
+                    "memory_id": row[0],
+                    "memory_type": row[1],
+                    "agent_id": row[2],
+                    "session_id": row[3],
+                    "session_iter": row[4],
+                    "task_code": row[5],
+                    "content": row[6],
+                    "title": row[7],
+                    "description": row[8],
+                    "tags": json.loads(row[9]) if row[9] else [],
+                    "metadata": json.loads(row[10]) if row[10] else {},
+                    "content_hash": row[11],
+                    "created_at": row[12],
+                    "updated_at": row[13],
+                    "accessed_at": row[14],
+                    "access_count": row[15],
+                    "similarity": max(0.0, 2.0 - row[16]) if row[16] is not None else 0.0,
+                    "source_type": row[17],
+                    "granularity": granularity
+                }
 
-                # Apply granularity-specific behavior
-                if granularity == 'fine':
-                    # Fine: Return chunks as-is (no expansion)
-                    results = []
-                    for chunk in matched_chunks[:limit]:
-                        result = chunk.copy()
-                        result["content"] = chunk["chunk_content"]  # Content = actual chunk
-                        results.append(result)
+                # Add chunk-specific fields
+                if row[17] == 'chunk' and len(row) > 18:
+                    result["chunk_index"] = row[18]
+                    result["chunk_content"] = row[19]
+                    if len(row) > 20:
+                        result["header_path"] = row[20]
+                        result["token_count"] = row[21]
+                        result["sibling_count"] = row[22]
+                        result["section_hierarchy"] = row[23]
+                        result["chunk_position_ratio"] = row[24]
 
-                elif granularity == 'medium':
-                    # Medium: Expand to sections (auto-merge siblings)
-                    results = self._expand_to_sections(matched_chunks, auto_merge_threshold, conn, limit)
+                results.append(result)
+
+            # Medium granularity: check for auto-merge opportunity
+            if granularity == 'medium' and results:
+                results = self._auto_merge_medium_chunks(results, auto_merge_threshold, conn)
 
             conn.close()
 
@@ -905,97 +871,6 @@ class SessionMemoryStore:
                 "error": "Granularity search failed",
                 "message": str(e)
             }
-
-    def _expand_to_sections(
-        self,
-        matched_chunks: List[Dict],
-        merge_threshold: float,
-        conn: sqlite3.Connection,
-        limit: int
-    ) -> List[Dict]:
-        """
-        Expand matched chunks to include their siblings (section-level context).
-
-        Logic:
-        1. Group matched chunks by (parent_id, header_path)
-        2. For each section, fetch ALL sibling chunks
-        3. Merge all siblings into section-level content
-        4. Return expanded sections (limit applied)
-
-        Args:
-            matched_chunks: List of matching chunks from vector search
-            merge_threshold: Unused (kept for compatibility)
-            conn: Database connection
-            limit: Maximum results to return
-
-        Returns:
-            List of expanded section results
-        """
-        # Group matched chunks by section
-        sections = {}
-        for chunk in matched_chunks:
-            parent_id = chunk["memory_id"]
-            section_path = chunk.get("header_path", "")
-            key = (parent_id, section_path)
-
-            if key not in sections:
-                sections[key] = {
-                    "matched_chunks": [],
-                    "representative": chunk  # Keep one chunk as template
-                }
-            sections[key]["matched_chunks"].append(chunk)
-
-        # Expand each section to include all siblings
-        expanded_results = []
-        for (parent_id, section_path), section_data in sections.items():
-            # Fetch ALL chunks from this section
-            all_section_chunks = conn.execute("""
-                SELECT chunk_index, COALESCE(original_content, content) as content, token_count
-                FROM memory_chunks
-                WHERE parent_id = ? AND header_path = ?
-                ORDER BY chunk_index ASC
-            """, (parent_id, section_path)).fetchall()
-
-            if not all_section_chunks:
-                continue
-
-            # Merge all sibling chunks
-            merged_content = "\n\n".join([chunk[1] for chunk in all_section_chunks])
-            total_tokens = sum([chunk[2] for chunk in all_section_chunks])
-
-            # Create expanded result
-            representative = section_data["representative"]
-            result = {
-                "memory_id": parent_id,
-                "memory_type": representative["memory_type"],
-                "agent_id": representative["agent_id"],
-                "session_id": representative["session_id"],
-                "session_iter": representative["session_iter"],
-                "task_code": representative["task_code"],
-                "title": representative["title"],
-                "description": representative["description"],
-                "tags": representative["tags"],
-                "metadata": representative["metadata"],
-                "content_hash": representative["content_hash"],
-                "created_at": representative["created_at"],
-                "updated_at": representative["updated_at"],
-                "accessed_at": representative["accessed_at"],
-                "access_count": representative["access_count"],
-                "similarity": representative["similarity"],
-                "section_content": merged_content,  # Merged section content from all sibling chunks
-                "source_type": "expanded_section",
-                "granularity": "medium",
-                "header_path": section_path,
-                "matched_chunk_count": len(section_data["matched_chunks"]),
-                "total_chunk_count": len(all_section_chunks),
-                "merged": True,
-                "token_count": total_tokens
-            }
-            expanded_results.append(result)
-
-        # Sort by similarity and limit
-        expanded_results.sort(key=lambda x: x["similarity"], reverse=True)
-        return expanded_results[:limit]
 
     def _auto_merge_medium_chunks(
         self,

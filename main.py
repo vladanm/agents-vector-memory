@@ -382,14 +382,15 @@ def store_working_memory(
     title: str = None,
     description: str = None,
     tags: list[str] = None,
-    metadata: dict = None
+    metadata: dict = None,
+    auto_chunk: bool = True
 ) -> dict[str, Any]:
     """
     Store important information during task execution (gotcha moments).
-    
+
     Args:
         agent_id: Agent identifier (required)
-        session_id: Session identifier (required)  
+        session_id: Session identifier (required)
         content: Working memory content
         session_iter: Session iteration number (optional)
         task_code: Task identifier (optional)
@@ -397,7 +398,8 @@ def store_working_memory(
         description: Brief description
         tags: List of relevant tags
         metadata: Additional metadata
-        
+        auto_chunk: Enable automatic document chunking (default: True for working_memory)
+
     Returns:
         Dict with success status and memory details
     """
@@ -411,7 +413,8 @@ def store_working_memory(
         title=title,
         description=description,
         tags=tags or [],
-        metadata=metadata or {}
+        metadata=metadata or {},
+        auto_chunk=auto_chunk
     )
 
 # ======================
@@ -424,20 +427,20 @@ def search_session_context(
     session_id: str = None,
     session_iter: int = None,
     query: str = None,
-    limit: int = 10,
+    limit: int = 3,
     latest_first: bool = True
 ) -> dict[str, Any]:
     """
     Search session context with proper scoping and ordering.
-    
+
     Args:
         agent_id: Filter by agent ID (optional)
-        session_id: Filter by session ID (optional)  
+        session_id: Filter by session ID (optional)
         session_iter: Filter by specific iteration (optional)
         query: Semantic search query (optional)
-        limit: Maximum results (default: 10)
+        limit: Maximum results (default: 3)
         latest_first: Order by latest iteration/creation first (default: True)
-        
+
     Returns:
         Dict with search results ordered by session_iter DESC, created_at DESC
     """
@@ -458,138 +461,26 @@ def search_system_memory(
     session_iter: int = None,
     task_code: str = None,
     query: str = None,
-    limit: int = 10,
+    limit: int = 3,
     latest_first: bool = True
 ) -> dict[str, Any]:
     """
     Search system memory with proper scoping and ordering.
-    
+
     Args:
         agent_id: Filter by agent ID (optional)
         session_id: Filter by session ID (optional)
         session_iter: Filter by specific iteration (optional)
         task_code: Filter by task code (optional)
         query: Semantic search query (optional)
-        limit: Maximum results (default: 10)
+        limit: Maximum results (default: 3)
         latest_first: Order by latest iteration/creation first (default: True)
-        
+
     Returns:
         Dict with search results ordered by session_iter DESC, created_at DESC
     """
     return store.search_memories(
         memory_type="system_memory",
-        agent_id=agent_id,
-        session_id=session_id,
-        session_iter=session_iter,
-        task_code=task_code,
-        query=query,
-        limit=limit,
-        latest_first=latest_first
-    )
-
-@mcp.tool()
-def search_reports(
-    agent_id: str = None,
-    session_id: str = None,
-    session_iter: int = None,
-    task_code: str = None,
-    query: str = None,
-    limit: int = 10,
-    latest_first: bool = True
-) -> dict[str, Any]:
-    """
-    Search reports with proper scoping and ordering.
-    
-    Args:
-        agent_id: Filter by agent ID (optional)
-        session_id: Filter by session ID (optional)
-        session_iter: Filter by specific iteration (optional)
-        task_code: Filter by task code (optional)
-        query: Semantic search query (optional)
-        limit: Maximum results (default: 10)
-        latest_first: Order by latest iteration/creation first (default: True)
-        
-    Returns:
-        Dict with search results ordered by session_iter DESC, created_at DESC
-    """
-    return store.search_memories(
-        memory_type="reports",
-        agent_id=agent_id,
-        session_id=session_id,
-        session_iter=session_iter,
-        task_code=task_code,
-        query=query,
-        limit=limit,
-        latest_first=latest_first
-    )
-
-@mcp.tool()
-def search_knowledge_base(
-    agent_id: str = None,
-    session_id: str = None,
-    session_iter: int = None,
-    task_code: str = None,
-    query: str = None,
-    limit: int = 10,
-    latest_first: bool = True,
-    similarity_threshold: float = 0.80
-) -> dict[str, Any]:
-    """
-    Search knowledge base documents with proper scoping and ordering.
-
-    Args:
-        agent_id: Filter by agent ID (optional)
-        session_id: Filter by session ID (optional)
-        session_iter: Filter by specific iteration (optional)
-        task_code: Filter by task code (optional)
-        query: Semantic search query (optional)
-        limit: Maximum results (default: 10)
-        latest_first: Order by latest iteration/creation first (default: True)
-        similarity_threshold: Minimum similarity score for results (default: 0.80)
-                            Higher = stricter filtering. Range: 0.0 to 1.0
-
-    Returns:
-        Dict with search results ordered by session_iter DESC, created_at DESC
-    """
-    return store.search_memories(
-        memory_type="knowledge_base",
-        agent_id=agent_id,
-        session_id=session_id,
-        session_iter=session_iter,
-        task_code=task_code,
-        query=query,
-        limit=limit,
-        latest_first=latest_first,
-        similarity_threshold=similarity_threshold
-    )
-
-@mcp.tool()
-def search_working_memory(
-    agent_id: str = None,
-    session_id: str = None,
-    session_iter: int = None,
-    task_code: str = None,
-    query: str = None,
-    limit: int = 10,
-    latest_first: bool = True
-) -> dict[str, Any]:
-    """
-    Search working memory with proper scoping and ordering.
-    
-    Args:
-        agent_id: Filter by agent ID (optional)
-        session_id: Filter by session ID (optional)
-        session_iter: Filter by specific iteration (optional)
-        task_code: Filter by task code (optional)
-        query: Semantic search query (optional)
-        limit: Maximum results (default: 10)
-        latest_first: Order by latest iteration/creation first (default: True)
-        
-    Returns:
-        Dict with search results ordered by session_iter DESC, created_at DESC
-    """
-    return store.search_memories(
-        memory_type="working_memory",
         agent_id=agent_id,
         session_id=session_id,
         session_iter=session_iter,
@@ -606,21 +497,21 @@ def search_input_prompts(
     session_iter: int = None,
     task_code: str = None,
     query: str = None,
-    limit: int = 10,
+    limit: int = 3,
     latest_first: bool = True
 ) -> dict[str, Any]:
     """
     Search input prompts with proper scoping and ordering.
-    
+
     Args:
         agent_id: Filter by agent ID (optional)
         session_id: Filter by session ID (optional)
         session_iter: Filter by specific iteration (optional)
         task_code: Filter by task code (optional)
         query: Semantic search query (optional)
-        limit: Maximum results (default: 10)
+        limit: Maximum results (default: 3)
         latest_first: Order by latest iteration/creation first (default: True)
-        
+
     Returns:
         Dict with search results ordered by session_iter DESC, created_at DESC
     """
@@ -752,6 +643,439 @@ def reconstruct_document(memory_id: int) -> dict[str, Any]:
         Dict with reconstructed content and chunk info
     """
     return store.reconstruct_document(memory_id)
+
+# ================================
+# THREE-TIER GRANULARITY SEARCH
+# ================================
+
+@mcp.tool()
+def search_knowledge_base_specific_chunks(
+    query: str,
+    agent_id: str = None,
+    session_id: str = None,
+    session_iter: int = None,
+    task_code: str = None,
+    limit: int = 3,
+    similarity_threshold: float = 0.7
+) -> dict[str, Any]:
+    """
+    Fine-grained search for knowledge base (<400 tokens per chunk).
+    Use for: pinpoint queries, specific details, code snippets, definitions.
+
+    Args:
+        query: Semantic search query (required)
+        agent_id: Filter by agent ID (optional)
+        session_id: Filter by session ID (optional)
+        session_iter: Filter by iteration (optional)
+        task_code: Filter by task code (optional)
+        limit: Maximum results (default: 3)
+        similarity_threshold: Minimum similarity 0.0-1.0 (default: 0.7)
+
+    Returns:
+        Dict with fine-grained search results. Each result contains:
+        - chunk_content: The specific chunk text (<400 tokens)
+        - content: Same as chunk_content (for backward compatibility)
+        - chunk_index, chunk_id: Chunk identifiers
+        - header_path: Section location
+        - source_type: "chunk"
+        - granularity: "fine"
+    """
+    return store.search_with_granularity(
+        query=query,
+        memory_type="knowledge_base",
+        granularity="fine",
+        agent_id=agent_id,
+        session_id=session_id,
+        session_iter=session_iter,
+        task_code=task_code,
+        limit=limit,
+        similarity_threshold=similarity_threshold
+    )
+
+@mcp.tool()
+def search_knowledge_base_section_context(
+    query: str,
+    agent_id: str = None,
+    session_id: str = None,
+    session_iter: int = None,
+    task_code: str = None,
+    limit: int = 3,
+    similarity_threshold: float = 0.7,
+    auto_merge_threshold: float = 0.6
+) -> dict[str, Any]:
+    """
+    Medium-grained search for knowledge base (400-1200 tokens per chunk).
+    Use for: section-level understanding, concepts, procedures.
+    Auto-merges sections when ≥60% of sibling chunks match.
+
+    Args:
+        query: Semantic search query (required)
+        agent_id: Filter by agent ID (optional)
+        session_id: Filter by session ID (optional)
+        session_iter: Filter by iteration (optional)
+        task_code: Filter by task code (optional)
+        limit: Maximum results (default: 3)
+        similarity_threshold: Minimum similarity 0.0-1.0 (default: 0.7)
+        auto_merge_threshold: Merge if ≥X siblings match (default: 0.6)
+
+    Returns:
+        Dict with medium-grained search results. Each result contains:
+        - section_content: Merged section text (400-1200 tokens)
+        - header_path: Section location
+        - matched_chunk_count: Chunks that matched query
+        - total_chunk_count: Total chunks in section
+        - merged: Boolean flag (true when expansion occurred)
+        - source_type: "expanded_section"
+        - granularity: "medium"
+    """
+    return store.search_with_granularity(
+        query=query,
+        memory_type="knowledge_base",
+        granularity="medium",
+        agent_id=agent_id,
+        session_id=session_id,
+        session_iter=session_iter,
+        task_code=task_code,
+        limit=limit,
+        similarity_threshold=similarity_threshold,
+        auto_merge_threshold=auto_merge_threshold
+    )
+
+@mcp.tool()
+def search_knowledge_base_full_documents(
+    query: str,
+    agent_id: str = None,
+    session_id: str = None,
+    session_iter: int = None,
+    task_code: str = None,
+    limit: int = 3,
+    similarity_threshold: float = 0.7
+) -> dict[str, Any]:
+    """
+    Coarse-grained search for knowledge base (full documents).
+    Use for: document discovery, high-level overviews, broad context.
+
+    Args:
+        query: Semantic search query (required)
+        agent_id: Filter by agent ID (optional)
+        session_id: Filter by session ID (optional)
+        session_iter: Filter by iteration (optional)
+        task_code: Filter by task code (optional)
+        limit: Maximum results (default: 3)
+        similarity_threshold: Minimum similarity 0.0-1.0 (default: 0.7)
+
+    Returns:
+        Dict with full document search results. Each result contains:
+        - content: Full document text (typically ~7000 tokens)
+        - title, description, tags: Document metadata
+        - source_type: "document"
+        - granularity: "coarse"
+    """
+    return store.search_with_granularity(
+        query=query,
+        memory_type="knowledge_base",
+        granularity="coarse",
+        agent_id=agent_id,
+        session_id=session_id,
+        session_iter=session_iter,
+        task_code=task_code,
+        limit=limit,
+        similarity_threshold=similarity_threshold
+    )
+
+@mcp.tool()
+def search_reports_specific_chunks(
+    query: str,
+    agent_id: str = None,
+    session_id: str = None,
+    session_iter: int = None,
+    task_code: str = None,
+    limit: int = 3,
+    similarity_threshold: float = 0.7
+) -> dict[str, Any]:
+    """
+    Fine-grained search for reports (<400 tokens per chunk).
+    Use for: specific findings, particular data points, precise details.
+
+    Args:
+        query: Semantic search query (required)
+        agent_id: Filter by agent ID (optional)
+        session_id: Filter by session ID (optional)
+        session_iter: Filter by iteration (optional)
+        task_code: Filter by task code (optional)
+        limit: Maximum results (default: 3)
+        similarity_threshold: Minimum similarity 0.0-1.0 (default: 0.7)
+
+    Returns:
+        Dict with fine-grained report search results. Each result contains:
+        - chunk_content: The specific chunk text (<400 tokens)
+        - content: Same as chunk_content (for backward compatibility)
+        - chunk_index, chunk_id: Chunk identifiers
+        - header_path: Section location
+        - source_type: "chunk"
+        - granularity: "fine"
+    """
+    return store.search_with_granularity(
+        query=query,
+        memory_type="reports",
+        granularity="fine",
+        agent_id=agent_id,
+        session_id=session_id,
+        session_iter=session_iter,
+        task_code=task_code,
+        limit=limit,
+        similarity_threshold=similarity_threshold
+    )
+
+@mcp.tool()
+def search_reports_section_context(
+    query: str,
+    agent_id: str = None,
+    session_id: str = None,
+    session_iter: int = None,
+    task_code: str = None,
+    limit: int = 3,
+    similarity_threshold: float = 0.7,
+    auto_merge_threshold: float = 0.6
+) -> dict[str, Any]:
+    """
+    Medium-grained search for reports (400-1200 tokens per chunk).
+    Use for: section-level analysis, grouped findings, contextual understanding.
+    Auto-merges sections when ≥60% of sibling chunks match.
+
+    Args:
+        query: Semantic search query (required)
+        agent_id: Filter by agent ID (optional)
+        session_id: Filter by session ID (optional)
+        session_iter: Filter by iteration (optional)
+        task_code: Filter by task code (optional)
+        limit: Maximum results (default: 3)
+        similarity_threshold: Minimum similarity 0.0-1.0 (default: 0.7)
+        auto_merge_threshold: Merge if ≥X siblings match (default: 0.6)
+
+    Returns:
+        Dict with medium-grained report search results. Each result contains:
+        - section_content: Merged section text (400-1200 tokens)
+        - header_path: Section location
+        - matched_chunk_count: Chunks that matched query
+        - total_chunk_count: Total chunks in section
+        - merged: Boolean flag (true when expansion occurred)
+        - source_type: "expanded_section"
+        - granularity: "medium"
+    """
+    return store.search_with_granularity(
+        query=query,
+        memory_type="reports",
+        granularity="medium",
+        agent_id=agent_id,
+        session_id=session_id,
+        session_iter=session_iter,
+        task_code=task_code,
+        limit=limit,
+        similarity_threshold=similarity_threshold,
+        auto_merge_threshold=auto_merge_threshold
+    )
+
+@mcp.tool()
+def search_reports_full_documents(
+    query: str,
+    agent_id: str = None,
+    session_id: str = None,
+    session_iter: int = None,
+    task_code: str = None,
+    limit: int = 3,
+    similarity_threshold: float = 0.7
+) -> dict[str, Any]:
+    """
+    Coarse-grained search for reports (full documents).
+    Use for: complete report discovery, executive summaries, full context.
+
+    Args:
+        query: Semantic search query (required)
+        agent_id: Filter by agent ID (optional)
+        session_id: Filter by session ID (optional)
+        session_iter: Filter by iteration (optional)
+        task_code: Filter by task code (optional)
+        limit: Maximum results (default: 3)
+        similarity_threshold: Minimum similarity 0.0-1.0 (default: 0.7)
+
+    Returns:
+        Dict with full report search results. Each result contains:
+        - content: Full document text (typically ~7000 tokens)
+        - title, description, tags: Document metadata
+        - source_type: "document"
+        - granularity: "coarse"
+    """
+    return store.search_with_granularity(
+        query=query,
+        memory_type="reports",
+        granularity="coarse",
+        agent_id=agent_id,
+        session_id=session_id,
+        session_iter=session_iter,
+        task_code=task_code,
+        limit=limit,
+        similarity_threshold=similarity_threshold
+    )
+
+# --------------------------------
+# WORKING MEMORY SEARCH TOOLS
+# --------------------------------
+
+@mcp.tool()
+def search_working_memory_specific_chunks(
+    query: str,
+    agent_id: str = None,
+    session_id: str = None,
+    session_iter: int = None,
+    task_code: str = None,
+    limit: int = 3,
+    similarity_threshold: float = 0.7
+) -> dict[str, Any]:
+    """
+    Fine-grained search for working memory (<400 tokens per chunk).
+    Use for: specific insights, particular gotcha moments, precise details.
+
+    Args:
+        query: Semantic search query (required)
+        agent_id: Filter by agent ID (optional)
+        session_id: Filter by session ID (optional)
+        session_iter: Filter by iteration (optional)
+        task_code: Filter by task code (optional)
+        limit: Maximum results (default: 3)
+        similarity_threshold: Minimum similarity 0.0-1.0 (default: 0.7)
+
+    Returns:
+        Dict with fine-grained working memory search results. Each result contains:
+        - chunk_content: The specific chunk text (<400 tokens)
+        - content: Same as chunk_content (for backward compatibility)
+        - chunk_index, chunk_id: Chunk identifiers
+        - header_path: Section location
+        - source_type: "chunk"
+        - granularity: "fine"
+    """
+    return store.search_with_granularity(
+        query=query,
+        memory_type="working_memory",
+        granularity="fine",
+        agent_id=agent_id,
+        session_id=session_id,
+        session_iter=session_iter,
+        task_code=task_code,
+        limit=limit,
+        similarity_threshold=similarity_threshold
+    )
+
+@mcp.tool()
+def search_working_memory_section_context(
+    query: str,
+    agent_id: str = None,
+    session_id: str = None,
+    session_iter: int = None,
+    task_code: str = None,
+    limit: int = 3,
+    similarity_threshold: float = 0.7,
+    auto_merge_threshold: float = 0.6
+) -> dict[str, Any]:
+    """
+    Medium-grained search for working memory (400-1200 tokens per chunk).
+    Use for: section-level understanding, grouped insights, contextual details.
+    Auto-merges sections when ≥60% of sibling chunks match.
+
+    Args:
+        query: Semantic search query (required)
+        agent_id: Filter by agent ID (optional)
+        session_id: Filter by session ID (optional)
+        session_iter: Filter by iteration (optional)
+        task_code: Filter by task code (optional)
+        limit: Maximum results (default: 3)
+        similarity_threshold: Minimum similarity 0.0-1.0 (default: 0.7)
+        auto_merge_threshold: Merge if ≥X siblings match (default: 0.6)
+
+    Returns:
+        Dict with medium-grained working memory search results. Each result contains:
+        - section_content: Merged section text (400-1200 tokens)
+        - header_path: Section location
+        - matched_chunk_count: Chunks that matched query
+        - total_chunk_count: Total chunks in section
+        - merged: Boolean flag (true when expansion occurred)
+        - source_type: "expanded_section"
+        - granularity: "medium"
+    """
+    return store.search_with_granularity(
+        query=query,
+        memory_type="working_memory",
+        granularity="medium",
+        agent_id=agent_id,
+        session_id=session_id,
+        session_iter=session_iter,
+        task_code=task_code,
+        limit=limit,
+        similarity_threshold=similarity_threshold,
+        auto_merge_threshold=auto_merge_threshold
+    )
+
+@mcp.tool()
+def search_working_memory_full_documents(
+    query: str,
+    agent_id: str = None,
+    session_id: str = None,
+    session_iter: int = None,
+    task_code: str = None,
+    limit: int = 3,
+    similarity_threshold: float = 0.7
+) -> dict[str, Any]:
+    """
+    Coarse-grained search for working memory (full documents).
+    Use for: complete working memory discovery, full context of insights.
+
+    Args:
+        query: Semantic search query (required)
+        agent_id: Filter by agent ID (optional)
+        session_id: Filter by session ID (optional)
+        session_iter: Filter by iteration (optional)
+        task_code: Filter by task code (optional)
+        limit: Maximum results (default: 3)
+        similarity_threshold: Minimum similarity 0.0-1.0 (default: 0.7)
+
+    Returns:
+        Dict with full working memory document search results. Each result contains:
+        - content: Full document text (typically ~7000 tokens)
+        - title, description, tags: Document metadata
+        - source_type: "document"
+        - granularity: "coarse"
+    """
+    return store.search_with_granularity(
+        query=query,
+        memory_type="working_memory",
+        granularity="coarse",
+        agent_id=agent_id,
+        session_id=session_id,
+        session_iter=session_iter,
+        task_code=task_code,
+        limit=limit,
+        similarity_threshold=similarity_threshold
+    )
+
+@mcp.tool()
+def expand_chunk_context(
+    memory_id: int,
+    chunk_index: int,
+    context_window: int = 2
+) -> dict[str, Any]:
+    """
+    Expand chunk context by retrieving surrounding sibling chunks.
+    Universal tool for any granularity level.
+
+    Args:
+        memory_id: Parent memory ID (required)
+        chunk_index: Index of the target chunk (required)
+        context_window: Number of chunks before/after (default: 2)
+
+    Returns:
+        Dict with target chunk, previous/next chunks, and expanded content
+    """
+    return store.expand_chunk_context(memory_id, chunk_index, context_window)
 
 # ======================
 # SERVER INITIALIZATION
