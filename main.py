@@ -28,7 +28,7 @@ Core Requirements:
 
 Supported Memory Types:
 - session_context: Agent session snapshots for continuity
-- input_prompt: Original user prompts for reference  
+- input_prompt: Original user prompts for reference
 - reports: Agent-generated analysis and findings
 - working_memory: Important information during task execution
 - system_memory: System configs, commands, scripts for tasks
@@ -64,19 +64,19 @@ store = None
 def initialize_store(working_dir: str = None, database_path: str = None) -> None:
     """Initialize the session memory store."""
     global store
-    
+
     if database_path:
         # Use direct database path (new approach)
         db_path = Path(database_path)
         if not db_path.is_absolute():
             print(f"Database path must be absolute: {database_path}", file=sys.stderr)
             sys.exit(1)
-        
+
         # Create parent directories if they don't exist
         db_path.parent.mkdir(parents=True, exist_ok=True)
         store = SessionMemoryStore(db_path=db_path)
         print(f"Agent session memory store initialized with direct path: {store.db_path}")
-        
+
     elif working_dir:
         # Use working directory approach (legacy)
         try:
@@ -85,13 +85,13 @@ def initialize_store(working_dir: str = None, database_path: str = None) -> None
         except SecurityError as e:
             print(f"Security error: {e}", file=sys.stderr)
             sys.exit(1)
-        
+
         # Initialize store with traditional path
         db_path = Path(config.working_dir) / "memory" / "agent_session_memory.db"
         db_path.parent.mkdir(parents=True, exist_ok=True)
         store = SessionMemoryStore(db_path=db_path)
         print(f"Agent session memory store initialized with working dir: {store.db_path}")
-        
+
     else:
         # Default behavior - use current working directory
         db_path = Path(config.working_dir) / "memory" / "agent_session_memory.db"
@@ -117,17 +117,17 @@ def store_session_context(
     """
     Store session context for main or sub-agents.
     Used to save session snapshots for continuity across iterations.
-    
+
     Args:
         agent_id: Agent identifier ("main" or "specialized-agent")
-        session_id: Session identifier 
+        session_id: Session identifier
         content: Session context content
         session_iter: Session iteration number (default: 1)
         title: Context title
         description: Brief description
         tags: List of relevant tags
         metadata: Additional metadata
-    
+
     Returns:
         Dict with success status and memory details
     """
@@ -158,7 +158,7 @@ def store_input_prompt(
     """
     Store original input prompt to prevent loss during session.
     Can be used by both main and sub-agents.
-    
+
     Args:
         agent_id: Agent identifier
         session_id: Session identifier
@@ -167,9 +167,9 @@ def store_input_prompt(
         task_code: Task identifier (optional)
         title: Prompt title
         description: Brief description
-        tags: List of relevant tags  
+        tags: List of relevant tags
         metadata: Additional metadata
-        
+
     Returns:
         Dict with success status and memory details
     """
@@ -201,7 +201,7 @@ def store_system_memory(
     """
     Store system information like script paths, endpoints, DB connections.
     Used by main agent for session-scoped system info, sub-agents for task-scoped.
-    
+
     Args:
         agent_id: Agent identifier
         session_id: Session identifier
@@ -212,7 +212,7 @@ def store_system_memory(
         description: Brief description
         tags: List of relevant tags
         metadata: Additional metadata
-        
+
     Returns:
         Dict with success status and memory details
     """
@@ -338,7 +338,7 @@ def store_report_observation(
 ) -> dict[str, Any]:
     """
     Store additional info for report observations.
-    
+
     Args:
         agent_id: Agent identifier (required)
         session_id: Session identifier (required)
@@ -350,7 +350,7 @@ def store_report_observation(
         description: Brief description
         tags: List of relevant tags
         metadata: Additional metadata
-        
+
     Returns:
         Dict with success status and memory details
     """
@@ -358,7 +358,7 @@ def store_report_observation(
         metadata = {}
     if parent_report_id:
         metadata['parent_report_id'] = parent_report_id
-        
+
     return store.store_memory(
         memory_type="report_observations",
         agent_id=agent_id,
@@ -444,6 +444,8 @@ def search_session_context(
     Returns:
         Dict with search results ordered by session_iter DESC, created_at DESC
     """
+    # BUGFIX P0 REGRESSION: Only pass similarity_threshold when query exists
+    # Scoped searches (no query) don't use similarity values
     return store.search_memories(
         memory_type="session_context",
         agent_id=agent_id,
@@ -451,7 +453,8 @@ def search_session_context(
         session_iter=session_iter,
         query=query,
         limit=limit,
-        latest_first=latest_first
+        latest_first=latest_first,
+        similarity_threshold=0.7 if query else None  # CONDITIONAL
     )
 
 @mcp.tool()
@@ -479,6 +482,7 @@ def search_system_memory(
     Returns:
         Dict with search results ordered by session_iter DESC, created_at DESC
     """
+    # BUGFIX P0 REGRESSION: Only pass similarity_threshold when query exists
     return store.search_memories(
         memory_type="system_memory",
         agent_id=agent_id,
@@ -487,7 +491,8 @@ def search_system_memory(
         task_code=task_code,
         query=query,
         limit=limit,
-        latest_first=latest_first
+        latest_first=latest_first,
+        similarity_threshold=0.7 if query else None  # CONDITIONAL
     )
 
 @mcp.tool()
@@ -515,6 +520,7 @@ def search_input_prompts(
     Returns:
         Dict with search results ordered by session_iter DESC, created_at DESC
     """
+    # BUGFIX P0 REGRESSION: Only pass similarity_threshold when query exists
     return store.search_memories(
         memory_type="input_prompt",
         agent_id=agent_id,
@@ -523,7 +529,8 @@ def search_input_prompts(
         task_code=task_code,
         query=query,
         limit=limit,
-        latest_first=latest_first
+        latest_first=latest_first,
+        similarity_threshold=0.7 if query else None  # CONDITIONAL
     )
 
 # ======================
@@ -539,12 +546,12 @@ def load_session_context_for_task(
     """
     Load session context only if agent previously worked on the same task_code.
     Used by sub-agents for task continuity.
-    
+
     Args:
         agent_id: Agent identifier
         session_id: Session identifier
         current_task_code: Current task being worked on
-        
+
     Returns:
         Dict with session context if task match found, empty if no match
     """
@@ -558,10 +565,10 @@ def load_session_context_for_task(
 def get_memory_by_id(memory_id: int) -> dict[str, Any]:
     """
     Retrieve specific memory by ID.
-    
+
     Args:
         memory_id: The memory ID to retrieve
-        
+
     Returns:
         Dict with memory details or error
     """
@@ -574,11 +581,11 @@ def get_session_stats(
 ) -> dict[str, Any]:
     """
     Get statistics about session memory usage.
-    
+
     Args:
         agent_id: Filter by agent ID (optional)
         session_id: Filter by session ID (optional)
-        
+
     Returns:
         Dict with session statistics
     """
@@ -591,11 +598,11 @@ def list_sessions(
 ) -> dict[str, Any]:
     """
     List recent sessions with basic info.
-    
+
     Args:
         agent_id: Filter by agent ID (optional)
         limit: Maximum sessions to return (default: 20)
-        
+
     Returns:
         Dict with session list
     """
@@ -1083,31 +1090,32 @@ def expand_chunk_context(
 
 if __name__ == "__main__":
     import argparse
-    
+
     print("🤖 AGENT SESSION MEMORY MCP SERVER STARTING")
     print(f"📁 File: {__file__}")
     print("🎯 Specialized for agent session management with proper scoping")
-    
+
     parser = argparse.ArgumentParser(description="Agent Session Memory MCP Server")
     parser.add_argument("--working-dir", help="Working directory for memory files (legacy)")
     parser.add_argument("--database-path", help="Direct path to SQLite database file (preferred)")
     args = parser.parse_args()
-    
+
     try:
         # Initialize store with database path or working directory
         initialize_store(working_dir=args.working_dir, database_path=args.database_path)
-        
-        print("🔧 Available session-centric functions:")
-        print("   📝 Storage: store_session_context, store_input_prompt, store_system_memory")
-        print("   📊 Reports: store_report, store_report_observation, store_working_memory") 
-        print("   🔍 Search: All with proper agent_id + session_id + session_iter scoping")
-        print("   🔄 Continuity: load_session_context_for_task")
-        print("   📈 Stats: get_session_stats, list_sessions")
-        print("⚡ Proper ordering: session_iter DESC, created_at DESC")
-        
+
+        # Log to stderr (stdout is reserved for MCP protocol)
+        print("🔧 Available session-centric functions:", file=sys.stderr)
+        print("   📝 Storage: store_session_context, store_input_prompt, store_system_memory", file=sys.stderr)
+        print("   📊 Reports: store_report, store_report_observation, store_working_memory", file=sys.stderr)
+        print("   🔍 Search: All with proper agent_id + session_id + session_iter scoping", file=sys.stderr)
+        print("   🔄 Continuity: load_session_context_for_task", file=sys.stderr)
+        print("   📈 Stats: get_session_stats, list_sessions", file=sys.stderr)
+        print("⚡ Proper ordering: session_iter DESC, created_at DESC", file=sys.stderr)
+
         # Run the MCP server
         mcp.run()
-        
+
     except Exception as e:
         print(f"Server error: {e}", file=sys.stderr)
         raise

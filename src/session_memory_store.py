@@ -38,24 +38,24 @@ class SessionMemoryStore:
     """
     Session-centric vector memory storage with agent scoping.
     """
-    
+
     def __init__(self, db_path: Path, embedding_model_name: str = None):
         """
         Initialize session memory store.
-        
+
         Args:
             db_path: Path to SQLite database file
             embedding_model_name: Name of embedding model to use
         """
         self.db_path = Path(db_path)
         self.embedding_model_name = embedding_model_name or Config.EMBEDDING_MODEL
-        
+
         # Initialize database
         self._init_database()
-        
+
         # Initialize embedding model (lazy loading)
         self._embedding_model = None
-    
+
     @property
     def embedding_model(self):
         """Lazy load embedding model to reduce memory usage"""
@@ -64,7 +64,7 @@ class SessionMemoryStore:
             from sentence_transformers import SentenceTransformer
             self._embedding_model = SentenceTransformer(self.embedding_model_name)
         return self._embedding_model
-    
+
     def _get_connection(self) -> sqlite3.Connection:
         """Get database connection with sqlite-vec enabled."""
         conn = sqlite3.connect(self.db_path)
@@ -74,11 +74,11 @@ class SessionMemoryStore:
         # Enable foreign key constraints for CASCADE DELETE
         conn.execute("PRAGMA foreign_keys = ON")
         return conn
-    
+
     def _init_database(self) -> None:
         """Initialize database schema with session-centric design."""
         conn = self._get_connection()
-        
+
         try:
             # Create main memory table with session scoping
             conn.execute("""
@@ -101,7 +101,7 @@ class SessionMemoryStore:
                     access_count INTEGER DEFAULT 0
                 )
             """)
-            
+
             # Create vector embeddings table
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS session_embeddings (
@@ -111,7 +111,7 @@ class SessionMemoryStore:
                     FOREIGN KEY (memory_id) REFERENCES session_memories(id) ON DELETE CASCADE
                 )
             """)
-            
+
             # Create vector search index
             conn.execute(f"""
                 CREATE VIRTUAL TABLE IF NOT EXISTS vec_session_search
@@ -169,9 +169,9 @@ class SessionMemoryStore:
             conn.execute("CREATE INDEX IF NOT EXISTS idx_memory_type ON session_memories(memory_type)")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_created_at ON session_memories(created_at)")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_session_iter ON session_memories(session_iter)")
-            
+
             conn.commit()
-            
+
         except Exception as e:
             conn.rollback()
             raise RuntimeError(f"Failed to initialize database: {e}")
@@ -314,25 +314,25 @@ class SessionMemoryStore:
             session_iter = validate_session_iter(session_iter)
             task_code = validate_task_code(task_code) if task_code else None
             tags = validate_tags(tags or [])
-            
+
             # Generate content hash for deduplication
             content_hash = generate_content_hash(f"{memory_type}:{agent_id}:{session_id}:{content}")
-            
+
             # Create embedding
             embedding = self.embedding_model.encode([content])[0]
-            
+
             # Current timestamp
             now = datetime.now(timezone.utc).isoformat()
-            
+
             conn = self._get_connection()
-            
+
             try:
                 # Check for duplicate
                 existing = conn.execute(
                     "SELECT id FROM session_memories WHERE content_hash = ?",
                     (content_hash,)
                 ).fetchone()
-                
+
                 if existing:
                     return {
                         "success": False,
@@ -340,7 +340,7 @@ class SessionMemoryStore:
                         "message": f"Memory already exists with ID: {existing[0]}",
                         "existing_id": existing[0]
                     }
-                
+
                 # Insert memory
                 cursor = conn.execute("""
                     INSERT INTO session_memories (
@@ -350,18 +350,18 @@ class SessionMemoryStore:
                     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """, (
                     memory_type, agent_id, session_id, session_iter, task_code,
-                    content, title, description, json.dumps(tags), 
+                    content, title, description, json.dumps(tags),
                     json.dumps(metadata or {}), content_hash, now, now
                 ))
-                
+
                 memory_id = cursor.lastrowid
-                
+
                 # Store embedding
                 conn.execute("""
                     INSERT INTO session_embeddings (memory_id, embedding)
                     VALUES (?, ?)
                 """, (memory_id, embedding.tobytes()))
-                
+
                 # Store in vector search index
                 conn.execute("""
                     INSERT INTO vec_session_search (memory_id, embedding)
@@ -446,13 +446,13 @@ class SessionMemoryStore:
                     result["chunks_stored"] = chunk_count
 
                 return result
-                
+
             except Exception as e:
                 conn.rollback()
                 raise
             finally:
                 conn.close()
-                
+
         except SecurityError as e:
             return {
                 "success": False,
@@ -462,10 +462,10 @@ class SessionMemoryStore:
         except Exception as e:
             return {
                 "success": False,
-                "error": "Storage failed", 
+                "error": "Storage failed",
                 "message": str(e)
             }
-    
+
     def search_memories(
         self,
         memory_type: str = None,
@@ -480,7 +480,7 @@ class SessionMemoryStore:
     ) -> Dict[str, Any]:
         """
         Search memories with proper scoping and ordering.
-        
+
         Args:
             memory_type: Filter by memory type
             agent_id: Filter by agent ID
@@ -491,39 +491,39 @@ class SessionMemoryStore:
             limit: Maximum results
             latest_first: Order by latest iteration/creation first
             similarity_threshold: Minimum similarity for semantic search
-            
+
         Returns:
             Dict with search results ordered properly
         """
         try:
             conn = self._get_connection()
-            
+
             # Build WHERE conditions
             where_conditions = []
             params = []
-            
+
             if memory_type:
                 where_conditions.append("m.memory_type = ?")
                 params.append(memory_type)
-            
+
             if agent_id:
                 where_conditions.append("m.agent_id = ?")
                 params.append(agent_id)
-            
+
             if session_id:
                 where_conditions.append("m.session_id = ?")
                 params.append(session_id)
-            
+
             if session_iter is not None:
                 where_conditions.append("m.session_iter = ?")
                 params.append(session_iter)
-            
+
             if task_code:
                 where_conditions.append("m.task_code = ?")
                 params.append(task_code)
-            
+
             where_clause = "WHERE " + " AND ".join(where_conditions) if where_conditions else ""
-            
+
             # Handle semantic search vs. scoped search
             if query and query.strip():
                 # Generate query embedding for semantic search
@@ -537,7 +537,14 @@ class SessionMemoryStore:
                 # Search both document embeddings and chunk embeddings
                 # 1. Search document embeddings
                 doc_vector_query = f"""
-                    SELECT m.*, v.distance, 'document' as source_type, NULL as chunk_index
+                    SELECT
+                        m.id, m.memory_type, m.agent_id, m.session_id,
+                        m.session_iter, m.task_code,
+                        m.content,
+                        m.title, m.description, m.tags, m.metadata,
+                        m.content_hash, m.created_at, m.updated_at,
+                        m.accessed_at, m.access_count,
+                        v.distance, 'document' as source_type, NULL as chunk_index
                     FROM session_memories m
                     JOIN (
                         SELECT memory_id, distance
@@ -590,13 +597,13 @@ class SessionMemoryStore:
                     [limit]
                 )
                 rows = conn.execute(combined_query, final_params).fetchall()
-                
+
             else:
                 # Pure scoped search without semantic filtering
                 order_clause = "ORDER BY m.created_at DESC"
                 if latest_first:
                     order_clause = "ORDER BY m.session_iter DESC, m.created_at DESC"
-                
+
                 final_query = f"""
                     SELECT m.*, 0.0 as distance
                     FROM session_memories m
@@ -605,9 +612,9 @@ class SessionMemoryStore:
                     LIMIT ?
                 """
                 params.append(limit)
-                
+
                 rows = conn.execute(final_query, params).fetchall()
-            
+
             # Format results
             results = []
             for row in rows:
@@ -655,14 +662,14 @@ class SessionMemoryStore:
                 memory_ids = [r["id"] for r in results]
                 placeholders = ",".join("?" * len(memory_ids))
                 conn.execute(f"""
-                    UPDATE session_memories 
+                    UPDATE session_memories
                     SET access_count = access_count + 1, accessed_at = ?
                     WHERE id IN ({placeholders})
                 """, [datetime.now(timezone.utc).isoformat()] + memory_ids)
                 conn.commit()
-            
+
             conn.close()
-            
+
             return {
                 "success": True,
                 "results": results,
@@ -670,7 +677,7 @@ class SessionMemoryStore:
                 "query": query,
                 "filters": {
                     "memory_type": memory_type,
-                    "agent_id": agent_id, 
+                    "agent_id": agent_id,
                     "session_id": session_id,
                     "session_iter": session_iter,
                     "task_code": task_code
@@ -678,7 +685,7 @@ class SessionMemoryStore:
                 "limit": limit,
                 "latest_first": latest_first
             }
-            
+
         except Exception as e:
             return {
                 "success": False,
@@ -754,8 +761,15 @@ class SessionMemoryStore:
             if granularity == 'coarse':
                 # Search full documents only
                 vector_query = f"""
-                    SELECT m.*, v.distance, 'document' as source_type,
-                           NULL as chunk_index, NULL as chunk_content
+                    SELECT
+                        m.id, m.memory_type, m.agent_id, m.session_id,
+                        m.session_iter, m.task_code,
+                        m.content,
+                        m.title, m.description, m.tags, m.metadata,
+                        m.content_hash, m.created_at, m.updated_at,
+                        m.accessed_at, m.access_count,
+                        v.distance, 'document' as source_type,
+                        NULL as chunk_index, NULL as chunk_content
                     FROM session_memories m
                     JOIN (
                         SELECT memory_id, distance
@@ -806,12 +820,16 @@ class SessionMemoryStore:
             if granularity == 'coarse':
                 results = []
                 for row in rows:
-                    # Column order from SELECT m.*, v.distance, 'document', NULL, NULL
-                    # m.*: id(0), memory_type(1), agent_id(2), session_id(3), session_iter(4),
-                    #      task_code(5), content(6), title(7), description(8), tags(9), metadata(10),
-                    #      content_hash(11), created_at(12), updated_at(13), accessed_at(14), access_count(15),
-                    #      document_summary(16), estimated_tokens(17), chunk_strategy(18)
-                    # Then: distance(19), source_type(20), chunk_index(21), chunk_content(22)
+                    # Column order from explicit SELECT (lines 764-772):
+                    # SELECT: m.id(0), m.memory_type(1), m.agent_id(2), m.session_id(3),
+                    #         m.session_iter(4), m.task_code(5), m.content(6),
+                    #         m.title(7), m.description(8), m.tags(9), m.metadata(10),
+                    #         m.content_hash(11), m.created_at(12), m.updated_at(13),
+                    #         m.accessed_at(14), m.access_count(15),
+                    #         v.distance(16), 'document' as source_type(17),
+                    #         NULL as chunk_index(18), NULL as chunk_content(19)
+                    # TOTAL: 20 columns (indices 0-19)
+                    # FIXED: Use row[16] for distance, not row[19]!
                     result = {
                         "memory_id": row[0],
                         "memory_type": row[1],
@@ -829,7 +847,7 @@ class SessionMemoryStore:
                         "updated_at": row[13],
                         "accessed_at": row[14],
                         "access_count": row[15],
-                        "similarity": max(0.0, 2.0 - row[19]) if row[19] is not None else 0.0,
+                        "similarity": max(0.0, 2.0 - float(row[16])) if row[16] is not None else 0.0,
                         "source_type": "document",
                         "granularity": "coarse"
                     }
@@ -854,7 +872,7 @@ class SessionMemoryStore:
                         "updated_at": row[12],
                         "accessed_at": row[13],
                         "access_count": row[14],
-                        "similarity": max(0.0, 2.0 - row[15]) if row[15] is not None else 0.0,
+                        "similarity": max(0.0, 2.0 - float(row[15])) if row[15] is not None else 0.0,
                         "chunk_index": row[16],
                         "chunk_id": row[17],
                         "chunk_content": row[18],
@@ -1197,36 +1215,36 @@ class SessionMemoryStore:
     def load_session_context_for_task(
         self,
         agent_id: str,
-        session_id: str, 
+        session_id: str,
         current_task_code: str
     ) -> Dict[str, Any]:
         """
         Load session context only if agent previously worked on the same task_code.
-        
+
         Args:
             agent_id: Agent identifier
             session_id: Session identifier
             current_task_code: Current task being worked on
-            
+
         Returns:
             Dict with session context if task match found
         """
         try:
             conn = self._get_connection()
-            
+
             # Look for previous session context with matching task_code
             rows = conn.execute("""
-                SELECT * FROM session_memories 
+                SELECT * FROM session_memories
                 WHERE memory_type = 'session_context'
-                AND agent_id = ? 
+                AND agent_id = ?
                 AND session_id = ?
                 AND task_code = ?
                 ORDER BY session_iter DESC, created_at DESC
                 LIMIT 1
             """, (agent_id, session_id, current_task_code)).fetchall()
-            
+
             conn.close()
-            
+
             if rows:
                 row = rows[0]
                 context = {
@@ -1243,7 +1261,7 @@ class SessionMemoryStore:
                     "metadata": json.loads(row[10]) if row[10] else {},
                     "created_at": row[12]
                 }
-                
+
                 return {
                     "success": True,
                     "found_previous_context": True,
@@ -1257,32 +1275,32 @@ class SessionMemoryStore:
                     "context": None,
                     "message": f"No previous context found for task: {current_task_code}"
                 }
-                
+
         except Exception as e:
             return {
                 "success": False,
                 "error": "Context loading failed",
                 "message": str(e)
             }
-    
+
     def get_memory(self, memory_id: int) -> Dict[str, Any]:
         """Retrieve specific memory by ID."""
         try:
             conn = self._get_connection()
-            
+
             row = conn.execute("""
                 SELECT * FROM session_memories WHERE id = ?
             """, (memory_id,)).fetchone()
-            
+
             conn.close()
-            
+
             if not row:
                 return {
                     "success": False,
                     "error": "Memory not found",
                     "message": f"No memory found with ID: {memory_id}"
                 }
-            
+
             memory = {
                 "id": row[0],
                 "memory_type": row[1],
@@ -1301,19 +1319,19 @@ class SessionMemoryStore:
                 "accessed_at": row[14],
                 "access_count": row[15]
             }
-            
+
             return {
                 "success": True,
                 "memory": memory
             }
-            
+
         except Exception as e:
             return {
                 "success": False,
                 "error": "Retrieval failed",
                 "message": str(e)
             }
-    
+
     def get_session_stats(
         self,
         agent_id: str = None,
@@ -1322,24 +1340,24 @@ class SessionMemoryStore:
         """Get statistics about session memory usage."""
         try:
             conn = self._get_connection()
-            
+
             # Build WHERE conditions for filtering
             where_conditions = []
             params = []
-            
+
             if agent_id:
                 where_conditions.append("agent_id = ?")
                 params.append(agent_id)
-            
+
             if session_id:
                 where_conditions.append("session_id = ?")
                 params.append(session_id)
-            
+
             where_clause = "WHERE " + " AND ".join(where_conditions) if where_conditions else ""
-            
+
             # Get overall stats
             stats_query = f"""
-                SELECT 
+                SELECT
                     COUNT(*) as total_memories,
                     COUNT(DISTINCT memory_type) as memory_types,
                     COUNT(DISTINCT agent_id) as unique_agents,
@@ -1351,9 +1369,9 @@ class SessionMemoryStore:
                 FROM session_memories
                 {where_clause}
             """
-            
+
             stats_row = conn.execute(stats_query, params).fetchone()
-            
+
             # Get memory type breakdown
             type_query = f"""
                 SELECT memory_type, COUNT(*) as count
@@ -1362,11 +1380,11 @@ class SessionMemoryStore:
                 GROUP BY memory_type
                 ORDER BY count DESC
             """
-            
+
             type_rows = conn.execute(type_query, params).fetchall()
-            
+
             conn.close()
-            
+
             return {
                 "success": True,
                 "total_memories": stats_row[0],
@@ -1383,14 +1401,14 @@ class SessionMemoryStore:
                     "session_id": session_id
                 }
             }
-            
+
         except Exception as e:
             return {
                 "success": False,
                 "error": "Stats retrieval failed",
                 "message": str(e)
             }
-    
+
     def list_sessions(
         self,
         agent_id: str = None,
@@ -1399,13 +1417,13 @@ class SessionMemoryStore:
         """List recent sessions with basic info."""
         try:
             conn = self._get_connection()
-            
+
             where_clause = "WHERE agent_id = ?" if agent_id else ""
             params = [agent_id] if agent_id else []
             params.append(limit)
-            
+
             rows = conn.execute(f"""
-                SELECT 
+                SELECT
                     agent_id,
                     session_id,
                     COUNT(*) as memory_count,
@@ -1419,9 +1437,9 @@ class SessionMemoryStore:
                 ORDER BY latest_activity DESC
                 LIMIT ?
             """, params).fetchall()
-            
+
             conn.close()
-            
+
             sessions = []
             for row in rows:
                 sessions.append({
@@ -1433,7 +1451,7 @@ class SessionMemoryStore:
                     "first_activity": row[5],
                     "memory_types": row[6].split(',') if row[6] else []
                 })
-            
+
             return {
                 "success": True,
                 "sessions": sessions,
@@ -1441,7 +1459,7 @@ class SessionMemoryStore:
                 "agent_filter": agent_id,
                 "limit": limit
             }
-            
+
         except Exception as e:
             return {
                 "success": False,
