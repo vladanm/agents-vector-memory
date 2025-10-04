@@ -44,29 +44,49 @@ def run_migration(db_path: str, migration_file: str):
         # Enable foreign keys
         conn.execute("PRAGMA foreign_keys = ON")
 
-        # Split SQL into individual statements
-        statements = [s.strip() for s in sql.split(';') if s.strip() and not s.strip().startswith('--')]
+        # Better SQL statement parsing: remove comments first, then split
+        lines = []
+        for line in sql.split('\n'):
+            # Remove inline comments
+            line = line.split('--')[0].strip()
+            if line:
+                lines.append(line)
+
+        cleaned_sql = ' '.join(lines)
+
+        # Split on semicolons and filter empty statements
+        statements = [s.strip() for s in cleaned_sql.split(';') if s.strip()]
 
         total = len(statements)
         print(f"\n📊 Executing {total} SQL statements...")
 
-        for idx, statement in enumerate(statements, 1):
-            # Skip comments
-            if statement.startswith('--'):
-                continue
+        executed = 0
+        skipped = 0
 
+        for idx, statement in enumerate(statements, 1):
             try:
                 conn.execute(statement)
                 print(f"  ✅ [{idx}/{total}] Executed successfully")
+                executed += 1
             except sqlite3.OperationalError as e:
+                error_msg = str(e).lower()
                 # Ignore "duplicate column" errors (migration already applied)
-                if "duplicate column" in str(e).lower():
+                if "duplicate column" in error_msg:
                     print(f"  ⚠️  [{idx}/{total}] Column already exists (skipping)")
+                    skipped += 1
+                # Ignore "already exists" for indexes
+                elif "already exists" in error_msg:
+                    print(f"  ⚠️  [{idx}/{total}] Index already exists (skipping)")
+                    skipped += 1
                 else:
+                    print(f"\n❌ Statement [{idx}/{total}] failed:")
+                    print(f"   Error: {e}")
+                    print(f"   Statement: {statement[:100]}...")
                     raise
 
         conn.commit()
         print(f"\n✅ Migration completed successfully!")
+        print(f"   Executed: {executed}, Skipped: {skipped}, Total: {total}")
 
         # Show updated schema
         print(f"\n📋 Updated memory_chunks schema:")
