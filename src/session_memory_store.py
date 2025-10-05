@@ -98,7 +98,11 @@ class SessionMemoryStore:
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL,
                     accessed_at TEXT,
-                    access_count INTEGER DEFAULT 0
+                    access_count INTEGER DEFAULT 0,
+                    document_structure TEXT DEFAULT NULL,
+                    document_summary TEXT DEFAULT NULL,
+                    estimated_tokens INTEGER DEFAULT 0,
+                    chunk_strategy TEXT DEFAULT 'hierarchical'
                 )
             """)
 
@@ -121,7 +125,7 @@ class SessionMemoryStore:
                 )
             """)
 
-            # Create memory chunks table for document chunking support (NEW)
+            # Create memory chunks table for document chunking support
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS memory_chunks (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -138,6 +142,17 @@ class SessionMemoryStore:
                     next_chunk_id INTEGER,
                     content_hash TEXT NOT NULL,
                     created_at TEXT NOT NULL,
+                    parent_title TEXT DEFAULT NULL,
+                    section_hierarchy TEXT DEFAULT NULL,
+                    granularity_level TEXT DEFAULT 'medium',
+                    chunk_position_ratio REAL DEFAULT 0.5,
+                    sibling_count INTEGER DEFAULT 1,
+                    depth_level INTEGER DEFAULT 0,
+                    contains_code BOOLEAN DEFAULT 0,
+                    contains_table BOOLEAN DEFAULT 0,
+                    keywords TEXT DEFAULT '[]',
+                    original_content TEXT DEFAULT NULL,
+                    is_contextually_enriched BOOLEAN DEFAULT 0,
                     FOREIGN KEY (parent_id) REFERENCES session_memories(id) ON DELETE CASCADE,
                     UNIQUE(parent_id, chunk_index)
                 )
@@ -169,6 +184,13 @@ class SessionMemoryStore:
             conn.execute("CREATE INDEX IF NOT EXISTS idx_memory_type ON session_memories(memory_type)")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_created_at ON session_memories(created_at)")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_session_iter ON session_memories(session_iter)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_memory_type_iter ON session_memories(memory_type, session_iter)")
+
+            # Create indexes for chunk granularity searches
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_chunks_granularity ON memory_chunks(granularity_level)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_chunks_section ON memory_chunks(section_hierarchy)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_chunks_parent_title ON memory_chunks(parent_title)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_chunks_contains_code ON memory_chunks(contains_code)")
 
             conn.commit()
 
