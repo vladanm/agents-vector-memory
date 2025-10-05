@@ -773,7 +773,8 @@ def search_knowledge_base_full_documents(
 
     Returns:
         Dict with full document search results. Each result contains:
-        - content: Full document text (typically ~7000 tokens)
+        - content: Full document text (complete original, no size limit)
+                  Small: <5k tokens | Medium: 5-50k tokens | Large: 50k+ tokens
         - title, description, tags: Document metadata
         - source_type: "document"
         - granularity: "coarse"
@@ -908,7 +909,8 @@ def search_reports_full_documents(
 
     Returns:
         Dict with full report search results. Each result contains:
-        - content: Full document text (typically ~7000 tokens)
+        - content: Full document text (complete original, no size limit)
+                  Small: <5k tokens | Medium: 5-50k tokens | Large: 50k+ tokens
         - title, description, tags: Document metadata
         - source_type: "document"
         - granularity: "coarse"
@@ -1047,7 +1049,8 @@ def search_working_memory_full_documents(
 
     Returns:
         Dict with full working memory document search results. Each result contains:
-        - content: Full document text (typically ~7000 tokens)
+        - content: Full document text (complete original, no size limit)
+                  Small: <5k tokens | Medium: 5-50k tokens | Large: 50k+ tokens
         - title, description, tags: Document metadata
         - source_type: "document"
         - granularity: "coarse"

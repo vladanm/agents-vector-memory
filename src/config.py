@@ -40,13 +40,13 @@ class Config:
     ]
     
     # Security limits
-    MAX_MEMORY_LENGTH = 100000       # Increased for reports
+    MAX_MEMORY_LENGTH = 500000       # 500k characters (~125k tokens) - supports large technical documents
     MAX_MEMORIES_PER_SEARCH = 100    # Increased for session searches
     MAX_TOTAL_MEMORIES = 100000      # Increased capacity
     MAX_TAG_LENGTH = 100
     MAX_TAGS_PER_MEMORY = 20         # Increased for better categorization
     MAX_CHUNK_SIZE = 2000
-    MAX_CHUNKS_PER_DOCUMENT = 1000   # Increased for large reports
+    MAX_CHUNKS_PER_DOCUMENT = 5000   # 5x increase - supports documents up to ~6M tokens when chunked
 
     # Chunking configuration (for document chunking feature)
     DEFAULT_CHUNK_SIZE = 800

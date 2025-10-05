@@ -54,8 +54,8 @@ def get_memory_type_config(memory_type: str) -> Dict[str, Any]:
     """
     configs = {
         "knowledge_base": {
-            "chunk_size": 1000,
-            "chunk_overlap": 100,
+            "chunk_size": 1200,
+            "chunk_overlap": 120,
             "preserve_structure": True,
             "default_auto_chunk": True
         },
