@@ -7,8 +7,9 @@ for enhanced document processing capabilities.
 """
 
 from enum import Enum
-from typing import Dict, Any, Optional
-from dataclasses import dataclass
+from typing import Dict, Any, Optional, List
+from dataclasses import dataclass, field
+from datetime import datetime, timezone
 
 
 class ContentFormat(Enum):
@@ -41,6 +42,18 @@ class ChunkEntry:
     is_contextually_enriched: bool = False
     granularity_level: str = "medium"
 
+    # Additional fields for database insertion
+    created_at: Optional[str] = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
+    parent_title: Optional[str] = None
+    section_hierarchy: Optional[str] = None
+    chunk_position_ratio: Optional[float] = None
+    sibling_count: Optional[int] = None
+    depth_level: Optional[int] = None
+    contains_code: bool = False
+    contains_table: bool = False
+    keywords: List[str] = field(default_factory=list)
+    embedding: Optional[bytes] = None
+
 
 def get_memory_type_config(memory_type: str) -> Dict[str, Any]:
     """
@@ -71,35 +84,49 @@ def get_memory_type_config(memory_type: str) -> Dict[str, Any]:
             "preserve_structure": True,
             "default_auto_chunk": True
         },
-        "system_memory": {
-            "chunk_size": 600,
-            "chunk_overlap": 60,
-            "preserve_structure": False,
-            "default_auto_chunk": True
-        },
         "session_context": {
             "chunk_size": 1000,
             "chunk_overlap": 100,
             "preserve_structure": False,
-            "default_auto_chunk": True
+            "default_auto_chunk": False
         },
         "input_prompt": {
-            "chunk_size": 500,
-            "chunk_overlap": 50,
+            "chunk_size": 2000,
+            "chunk_overlap": 200,
             "preserve_structure": False,
-            "default_auto_chunk": True
+            "default_auto_chunk": False
         },
-        "report_observations": {
-            "chunk_size": 800,
-            "chunk_overlap": 80,
-            "preserve_structure": False,
-            "default_auto_chunk": True
+        "system_memory": {
+            "chunk_size": 1500,
+            "chunk_overlap": 150,
+            "preserve_structure": True,
+            "default_auto_chunk": False
         }
     }
 
-    return configs.get(memory_type, {
-        "chunk_size": 800,
-        "chunk_overlap": 80,
+    # Default config if memory_type not found
+    default_config = {
+        "chunk_size": 1000,
+        "chunk_overlap": 100,
         "preserve_structure": False,
         "default_auto_chunk": False
-    })
+    }
+
+    return configs.get(memory_type, default_config)
+
+
+def get_valid_memory_types() -> List[str]:
+    """Get list of valid memory types"""
+    return [
+        "session_context",
+        "input_prompt",
+        "system_memory",
+        "knowledge_base",
+        "reports",
+        "working_memory",
+        "report_observation"
+    ]
+
+
+# Export constants
+VALID_MEMORY_TYPES = get_valid_memory_types()

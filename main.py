@@ -444,8 +444,8 @@ def search_session_context(
     Returns:
         Dict with search results ordered by session_iter DESC, created_at DESC
     """
-    # BUGFIX P0 REGRESSION: Only pass similarity_threshold when query exists
-    # Scoped searches (no query) don't use similarity values
+    # Note: search_memories() performs scoped/filtered searches, not semantic search
+    # For semantic search with similarity thresholds, use search_with_granularity()
     return store.search_memories(
         memory_type="session_context",
         agent_id=agent_id,
@@ -453,8 +453,7 @@ def search_session_context(
         session_iter=session_iter,
         query=query,
         limit=limit,
-        latest_first=latest_first,
-        similarity_threshold=0.7 if query else None  # CONDITIONAL
+        latest_first=latest_first
     )
 
 @mcp.tool()
@@ -482,7 +481,8 @@ def search_system_memory(
     Returns:
         Dict with search results ordered by session_iter DESC, created_at DESC
     """
-    # BUGFIX P0 REGRESSION: Only pass similarity_threshold when query exists
+    # Note: search_memories() performs scoped/filtered searches, not semantic search
+    # For semantic search with similarity thresholds, use search_with_granularity()
     return store.search_memories(
         memory_type="system_memory",
         agent_id=agent_id,
@@ -491,8 +491,7 @@ def search_system_memory(
         task_code=task_code,
         query=query,
         limit=limit,
-        latest_first=latest_first,
-        similarity_threshold=0.7 if query else None  # CONDITIONAL
+        latest_first=latest_first
     )
 
 @mcp.tool()
@@ -520,7 +519,8 @@ def search_input_prompts(
     Returns:
         Dict with search results ordered by session_iter DESC, created_at DESC
     """
-    # BUGFIX P0 REGRESSION: Only pass similarity_threshold when query exists
+    # Note: search_memories() performs scoped/filtered searches, not semantic search
+    # For semantic search with similarity thresholds, use search_with_granularity()
     return store.search_memories(
         memory_type="input_prompt",
         agent_id=agent_id,
@@ -529,8 +529,7 @@ def search_input_prompts(
         task_code=task_code,
         query=query,
         limit=limit,
-        latest_first=latest_first,
-        similarity_threshold=0.7 if query else None  # CONDITIONAL
+        latest_first=latest_first
     )
 
 # ======================

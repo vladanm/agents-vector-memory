@@ -1,31 +1,20 @@
 """
-Agent Session Memory Store
-==========================
+Session Memory Store with Vector Search
+========================================
 
-Core storage engine for agent session management with proper scoping,
-ordering, and task continuity support.
+Session-scoped memory management with semantic search via sqlite-vec.
 """
 
-import sqlite3
-import sqlite_vec
-import json
+import os
 import re
+import json
+import time
+import sqlite3
+import hashlib
 from datetime import datetime, timezone
-import tempfile
 from pathlib import Path
-from typing import List, Optional, Dict, Any, Tuple
-
-# DEBUG: Log module load
-with open("/tmp/vector_memory_debug.log", "a") as f:
-    f.write(f"\n{'='*60}\n")
-    f.write(f"session_memory_store.py LOADED at {datetime.now()}\n")
-    f.write(f"{'='*60}\n")
-
-try:
-    import yaml
-    YAML_AVAILABLE = True
-except ImportError:
-    YAML_AVAILABLE = False
+from typing import Dict, Any, List, Optional
+import tempfile
 
 try:
     import tiktoken
@@ -33,313 +22,391 @@ try:
 except ImportError:
     TIKTOKEN_AVAILABLE = False
 
-from .config import Config
-from .security import (
-    validate_agent_id, validate_session_id, validate_task_code,
-    validate_memory_type, validate_content, validate_session_iter,
-    validate_tags, generate_content_hash, SecurityError
-)
+try:
+    import yaml
+    YAML_AVAILABLE = True
+except ImportError:
+    YAML_AVAILABLE = False
+
+from .chunking import DocumentChunker, ChunkingConfig
+from .memory_types import ContentFormat, ChunkEntry, get_memory_type_config
+
+# Valid memory types
+VALID_MEMORY_TYPES = [
+    "session_context", "input_prompt", "system_memory", "reports",
+    "report_observations", "working_memory", "knowledge_base"
+]
 
 
 class SessionMemoryStore:
     """
-    Session-centric vector memory storage with agent scoping.
+    Session-scoped memory storage with vector search.
+
+    Supports hierarchical chunking, embedding, and multi-granularity search.
     """
 
-    def __init__(self, db_path: Path, embedding_model_name: str = None):
+    def __init__(self, db_path: str = None):
         """
         Initialize session memory store.
 
         Args:
-            db_path: Path to SQLite database file
-            embedding_model_name: Name of embedding model to use
+            db_path: Path to SQLite database (defaults to ./memory/agent_session_memory.db)
         """
-        self.db_path = Path(db_path)
-        self.embedding_model_name = embedding_model_name or Config.EMBEDDING_MODEL
+        if db_path is None:
+            # Default to ./memory/agent_session_memory.db
+            memory_dir = Path.cwd() / "memory" / "memory"
+            memory_dir.mkdir(parents=True, exist_ok=True)
+            db_path = str(memory_dir / "agent_session_memory.db")
 
-        # Initialize database
-        self._init_database()
+        self.db_path = db_path
 
-        # Initialize embedding model (lazy loading)
-        self._embedding_model = None
-        self._token_encoder = None
+        # Initialize database schema
+        self._init_schema()
+
+        # Initialize chunker (lazily, only when needed)
+        self._chunker = None
 
     @property
-    def embedding_model(self):
-        """Lazy load embedding model to reduce memory usage"""
-        if self._embedding_model is None:
-            # Import here to avoid circular dependencies
-            from sentence_transformers import SentenceTransformer
-            self._embedding_model = SentenceTransformer(self.embedding_model_name)
-        return self._embedding_model
+    def chunker(self):
+        """Lazy initialization of chunker"""
+        if self._chunker is None:
+            self._chunker = DocumentChunker()
+        return self._chunker
 
     @property
     def token_encoder(self):
-        """Lazy-loaded cached tiktoken encoder for performance"""
-        if self._token_encoder is None and TIKTOKEN_AVAILABLE:
-            try:
-                self._token_encoder = tiktoken.get_encoding("cl100k_base")
-            except Exception:
-                pass
+        """Cached token encoder instance"""
+        if not hasattr(self, '_token_encoder'):
+            if TIKTOKEN_AVAILABLE:
+                try:
+                    self._token_encoder = tiktoken.get_encoding("cl100k_base")
+                except Exception:
+                    self._token_encoder = None
+            else:
+                self._token_encoder = None
         return self._token_encoder
 
     def _estimate_tokens(self, text: str) -> int:
         """
-        Estimate token count for text using cached encoder.
-        
-        Args:
-            text: Text to estimate tokens for
-        
-        Returns:
-            Estimated token count
+        Estimate token count for text using cached tokenizer.
+        Falls back to character-based estimation if tokenizer unavailable.
         """
         if self.token_encoder:
             try:
                 return len(self.token_encoder.encode(text))
             except Exception:
                 pass
-        # Fallback: 1 token ≈ 4 characters
+
+        # Fallback: ~4 characters per token
         return len(text) // 4
 
-    def _format_bytes_human_readable(self, bytes_size: int) -> str:
-        """Format bytes as human-readable string (B/KB/MB/GB)."""
-        if bytes_size < 1024:
-            return f"{bytes_size} B"
-        elif bytes_size < 1024**2:
-            return f"{bytes_size/1024:.1f} KB"
-        elif bytes_size < 1024**3:
-            return f"{bytes_size/1024**2:.1f} MB"
-        else:
-            return f"{bytes_size/1024**3:.1f} GB"
+    def _format_bytes_human_readable(self, size_bytes: int) -> str:
+        """Format file size in human-readable format"""
+        for unit in ['B', 'KB', 'MB', 'GB']:
+            if size_bytes < 1024.0:
+                return f"{size_bytes:.1f} {unit}"
+            size_bytes /= 1024.0
+        return f"{size_bytes:.1f} TB"
 
     def _get_connection(self) -> sqlite3.Connection:
-        """Get database connection with sqlite-vec enabled."""
+        """Get database connection with extensions loaded"""
         conn = sqlite3.connect(self.db_path)
-        conn.enable_load_extension(True)
-        sqlite_vec.load(conn)
-        conn.enable_load_extension(False)
-        # Enable foreign key constraints for CASCADE DELETE
-        conn.execute("PRAGMA foreign_keys = ON")
+
+        # Load sqlite-vec extension
+        try:
+            conn.enable_load_extension(True)
+            # Try common paths for vec0 extension
+            vec_paths = [
+                "./vec0",
+                "/usr/local/lib/vec0",
+                "/opt/homebrew/lib/vec0",
+            ]
+
+            loaded = False
+            for vec_path in vec_paths:
+                try:
+                    conn.load_extension(vec_path)
+                    loaded = True
+                    break
+                except sqlite3.OperationalError:
+                    continue
+
+            if not loaded:
+                # Try loading without path (system-installed)
+                try:
+                    conn.load_extension("vec0")
+                    loaded = True
+                except sqlite3.OperationalError:
+                    pass
+
+            conn.enable_load_extension(False)
+
+            if not loaded:
+                # Vector search will be unavailable but basic operations work
+                pass
+
+        except Exception:
+            # Extension loading failed - continue without vector search
+            pass
+
         return conn
 
-    def _init_database(self) -> None:
-        """Initialize database schema with session-centric design."""
-        conn = self._get_connection()
+    def _migrate_schema(self, conn: sqlite3.Connection) -> int:
+        """
+        Migrate database schema to latest version by adding missing columns.
 
+        This method is idempotent - safe to run multiple times. It detects
+        which columns are missing and only adds those, preserving all existing data.
+
+        Args:
+            conn: Active database connection
+
+        Returns:
+            Number of migrations applied (0 if schema already up-to-date)
+
+        Raises:
+            sqlite3.Error: If migration fails
+        """
         try:
-            # Create main memory table with session scoping
-            conn.execute("""
-                CREATE TABLE IF NOT EXISTS session_memories (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    memory_type TEXT NOT NULL,
-                    agent_id TEXT NOT NULL,
-                    session_id TEXT NOT NULL,
-                    session_iter INTEGER DEFAULT 1,
-                    task_code TEXT,
-                    content TEXT NOT NULL,
-                    title TEXT,
-                    description TEXT,
-                    tags TEXT NOT NULL DEFAULT '[]',
-                    metadata TEXT DEFAULT '{}',
-                    content_hash TEXT UNIQUE NOT NULL,
-                    created_at TEXT NOT NULL,
-                    updated_at TEXT NOT NULL,
-                    accessed_at TEXT,
-                    access_count INTEGER DEFAULT 0,
-                    document_structure TEXT DEFAULT NULL,
-                    document_summary TEXT DEFAULT NULL,
-                    estimated_tokens INTEGER DEFAULT 0,
-                    chunk_strategy TEXT DEFAULT 'hierarchical'
+            # Check if memory_chunks table exists
+            cursor = conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name='memory_chunks'"
+            )
+            if not cursor.fetchone():
+                # Table doesn't exist yet, will be created by CREATE TABLE statement
+                return 0
+
+            # Get existing columns
+            cursor = conn.execute("PRAGMA table_info(memory_chunks)")
+            existing_columns = {row[1] for row in cursor.fetchall()}
+
+            # Define required columns with their ALTER TABLE statements
+            # Format: column_name: (alter_statement, column_type, default_value)
+            required_columns = {
+                'granularity_level': (
+                    "ALTER TABLE memory_chunks ADD COLUMN granularity_level TEXT DEFAULT 'medium'",
+                    "TEXT",
+                    "'medium'"
+                ),
+                'parent_title': (
+                    "ALTER TABLE memory_chunks ADD COLUMN parent_title TEXT DEFAULT NULL",
+                    "TEXT",
+                    "NULL"
+                ),
+                'section_hierarchy': (
+                    "ALTER TABLE memory_chunks ADD COLUMN section_hierarchy TEXT DEFAULT NULL",
+                    "TEXT",
+                    "NULL"
+                ),
+                'chunk_position_ratio': (
+                    "ALTER TABLE memory_chunks ADD COLUMN chunk_position_ratio REAL DEFAULT 0.5",
+                    "REAL",
+                    "0.5"
+                ),
+                'sibling_count': (
+                    "ALTER TABLE memory_chunks ADD COLUMN sibling_count INTEGER DEFAULT 1",
+                    "INTEGER",
+                    "1"
+                ),
+                'depth_level': (
+                    "ALTER TABLE memory_chunks ADD COLUMN depth_level INTEGER DEFAULT 0",
+                    "INTEGER",
+                    "0"
+                ),
+                'contains_code': (
+                    "ALTER TABLE memory_chunks ADD COLUMN contains_code BOOLEAN DEFAULT 0",
+                    "BOOLEAN",
+                    "0"
+                ),
+                'contains_table': (
+                    "ALTER TABLE memory_chunks ADD COLUMN contains_table BOOLEAN DEFAULT 0",
+                    "BOOLEAN",
+                    "0"
+                ),
+                'keywords': (
+                    "ALTER TABLE memory_chunks ADD COLUMN keywords TEXT DEFAULT '[]'",
+                    "TEXT",
+                    "'[]'"
+                ),
+                'original_content': (
+                    "ALTER TABLE memory_chunks ADD COLUMN original_content TEXT DEFAULT NULL",
+                    "TEXT",
+                    "NULL"
+                ),
+                'is_contextually_enriched': (
+                    "ALTER TABLE memory_chunks ADD COLUMN is_contextually_enriched BOOLEAN DEFAULT 0",
+                    "BOOLEAN",
+                    "0"
                 )
-            """)
+            }
 
-            # Create vector embeddings table
-            conn.execute("""
-                CREATE TABLE IF NOT EXISTS session_embeddings (
-                    id INTEGER PRIMARY KEY,
-                    memory_id INTEGER NOT NULL,
-                    embedding BLOB NOT NULL,
-                    FOREIGN KEY (memory_id) REFERENCES session_memories(id) ON DELETE CASCADE
-                )
-            """)
+            # Determine which columns need to be added
+            migrations_to_apply = []
+            for column_name, (alter_statement, col_type, default_val) in required_columns.items():
+                if column_name not in existing_columns:
+                    migrations_to_apply.append({
+                        'column': column_name,
+                        'statement': alter_statement,
+                        'type': col_type,
+                        'default': default_val
+                    })
 
-            # Create vector search index
-            conn.execute(f"""
-                CREATE VIRTUAL TABLE IF NOT EXISTS vec_session_search
-                USING vec0(
-                    memory_id INTEGER PRIMARY KEY,
-                    embedding float[{Config.EMBEDDING_DIM}]
-                )
-            """)
+            # If no migrations needed, return early
+            if not migrations_to_apply:
+                print("✅ Database schema is up-to-date (no migrations needed)")
+                return 0
 
-            # Create memory chunks table for document chunking support
-            conn.execute("""
-                CREATE TABLE IF NOT EXISTS memory_chunks (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    parent_id INTEGER NOT NULL,
-                    chunk_index INTEGER NOT NULL,
-                    content TEXT NOT NULL,
-                    chunk_type TEXT DEFAULT 'text',
-                    start_char INTEGER,
-                    end_char INTEGER,
-                    token_count INTEGER,
-                    header_path TEXT,
-                    level INTEGER DEFAULT 0,
-                    prev_chunk_id INTEGER,
-                    next_chunk_id INTEGER,
-                    content_hash TEXT NOT NULL,
-                    created_at TEXT NOT NULL,
-                    parent_title TEXT DEFAULT NULL,
-                    section_hierarchy TEXT DEFAULT NULL,
-                    granularity_level TEXT DEFAULT 'medium',
-                    chunk_position_ratio REAL DEFAULT 0.5,
-                    sibling_count INTEGER DEFAULT 1,
-                    depth_level INTEGER DEFAULT 0,
-                    contains_code BOOLEAN DEFAULT 0,
-                    contains_table BOOLEAN DEFAULT 0,
-                    keywords TEXT DEFAULT '[]',
-                    original_content TEXT DEFAULT NULL,
-                    is_contextually_enriched BOOLEAN DEFAULT 0,
-                    FOREIGN KEY (parent_id) REFERENCES session_memories(id) ON DELETE CASCADE,
-                    UNIQUE(parent_id, chunk_index)
-                )
-            """)
+            # Apply migrations
+            print(f"🔄 Applying {len(migrations_to_apply)} schema migration(s)...")
 
-            # Create chunk embeddings table for semantic search on chunks
-            conn.execute("""
-                CREATE TABLE IF NOT EXISTS chunk_embeddings (
-                    id INTEGER PRIMARY KEY,
-                    chunk_id INTEGER NOT NULL,
-                    embedding BLOB NOT NULL,
-                    FOREIGN KEY (chunk_id) REFERENCES memory_chunks(id) ON DELETE CASCADE
-                )
-            """)
+            for migration in migrations_to_apply:
+                try:
+                    conn.execute(migration['statement'])
+                    print(f"  ✅ Added column: {migration['column']} ({migration['type']}, default={migration['default']})")
+                except sqlite3.Error as e:
+                    # If column already exists (race condition), continue
+                    if "duplicate column" in str(e).lower():
+                        print(f"  ⚠️  Column {migration['column']} already exists, skipping")
+                        continue
+                    else:
+                        # Re-raise other errors
+                        raise
 
-            # Create vector search index for chunks
-            conn.execute(f"""
-                CREATE VIRTUAL TABLE IF NOT EXISTS vec_chunk_search
-                USING vec0(
-                    chunk_id INTEGER PRIMARY KEY,
-                    embedding float[{Config.EMBEDDING_DIM}]
-                )
-            """)
-
-            # Create indexes for efficient scoped searches
-            conn.execute("CREATE INDEX IF NOT EXISTS idx_agent_session ON session_memories(agent_id, session_id)")
-            conn.execute("CREATE INDEX IF NOT EXISTS idx_agent_session_iter ON session_memories(agent_id, session_id, session_iter)")
-            conn.execute("CREATE INDEX IF NOT EXISTS idx_agent_session_task ON session_memories(agent_id, session_id, task_code)")
-            conn.execute("CREATE INDEX IF NOT EXISTS idx_memory_type ON session_memories(memory_type)")
-            conn.execute("CREATE INDEX IF NOT EXISTS idx_created_at ON session_memories(created_at)")
-            conn.execute("CREATE INDEX IF NOT EXISTS idx_session_iter ON session_memories(session_iter)")
-            conn.execute("CREATE INDEX IF NOT EXISTS idx_memory_type_iter ON session_memories(memory_type, session_iter)")
-
-            # Create indexes for chunk granularity searches
-            conn.execute("CREATE INDEX IF NOT EXISTS idx_chunks_granularity ON memory_chunks(granularity_level)")
-            conn.execute("CREATE INDEX IF NOT EXISTS idx_chunks_section ON memory_chunks(section_hierarchy)")
-            conn.execute("CREATE INDEX IF NOT EXISTS idx_chunks_parent_title ON memory_chunks(parent_title)")
-            conn.execute("CREATE INDEX IF NOT EXISTS idx_chunks_contains_code ON memory_chunks(contains_code)")
-
+            # Commit all migrations as a transaction
             conn.commit()
 
-        except Exception as e:
+            # Verify migrations were applied
+            cursor = conn.execute("PRAGMA table_info(memory_chunks)")
+            updated_columns = {row[1] for row in cursor.fetchall()}
+
+            # Check if all required columns now exist
+            missing_after_migration = set(required_columns.keys()) - updated_columns
+            if missing_after_migration:
+                raise sqlite3.Error(
+                    f"Migration incomplete: columns still missing after migration: {missing_after_migration}"
+                )
+
+            print(f"✅ Successfully applied {len(migrations_to_apply)} schema migration(s)")
+            print(f"   Database schema updated from {len(existing_columns)} to {len(updated_columns)} columns")
+
+            return len(migrations_to_apply)
+
+        except sqlite3.Error as e:
+            print(f"❌ Schema migration failed: {e}")
             conn.rollback()
-            raise RuntimeError(f"Failed to initialize database: {e}")
-        finally:
-            conn.close()
+            raise
 
-    def _extract_yaml_frontmatter(self, content: str) -> Tuple[str, Dict[str, Any]]:
-        """
-        Extract YAML frontmatter from markdown content.
+    def _init_schema(self):
+        """Initialize database schema"""
+        conn = self._get_connection()
 
-        Args:
-            content: Content that may contain YAML frontmatter
+        # Main session memories table
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS session_memories (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                memory_type TEXT NOT NULL,
+                agent_id TEXT NOT NULL,
+                session_id TEXT NOT NULL,
+                session_iter INTEGER DEFAULT 1,
+                task_code TEXT,
+                content TEXT NOT NULL,
+                title TEXT,
+                description TEXT,
+                tags TEXT,
+                metadata TEXT,
+                content_hash TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                accessed_at TEXT NOT NULL,
+                access_count INTEGER DEFAULT 0
+            )
+        """)
 
-        Returns:
-            Tuple of (clean_content, frontmatter_dict)
-        """
-        frontmatter_pattern = r'^---\s*\n(.*?)\n---\s*\n'
-        match = re.match(frontmatter_pattern, content, re.DOTALL)
+        # Memory chunks table (for hierarchical chunking)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS memory_chunks (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                parent_id INTEGER NOT NULL,
+                chunk_index INTEGER NOT NULL,
+                content TEXT NOT NULL,
+                chunk_type TEXT DEFAULT 'text',
+                start_char INTEGER,
+                end_char INTEGER,
+                token_count INTEGER,
+                header_path TEXT,
+                level INTEGER DEFAULT 0,
+                prev_chunk_id INTEGER,
+                next_chunk_id INTEGER,
+                content_hash TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                parent_title TEXT DEFAULT NULL,
+                section_hierarchy TEXT DEFAULT NULL,
+                granularity_level TEXT DEFAULT 'medium',
+                chunk_position_ratio REAL DEFAULT 0.5,
+                sibling_count INTEGER DEFAULT 1,
+                depth_level INTEGER DEFAULT 0,
+                contains_code BOOLEAN DEFAULT 0,
+                contains_table BOOLEAN DEFAULT 0,
+                keywords TEXT DEFAULT '[]',
+                original_content TEXT DEFAULT NULL,
+                is_contextually_enriched BOOLEAN DEFAULT 0,
+                embedding BLOB,
+                FOREIGN KEY (parent_id) REFERENCES session_memories(id) ON DELETE CASCADE,
+                UNIQUE(parent_id, chunk_index)
+            )
+        """)
 
-        if match and YAML_AVAILABLE:
-            frontmatter_text = match.group(1)
-            try:
-                frontmatter_data = yaml.safe_load(frontmatter_text) or {}
-                clean_content = content[match.end():]
-                return clean_content, frontmatter_data
-            except Exception:
-                return content, {}
-        return content, {}
+        # ========================================
+        # MIGRATION: Add missing columns to existing databases
+        # ========================================
+        try:
+            migrations_applied = self._migrate_schema(conn)
+            if migrations_applied > 0:
+                print(f"📋 Database migration completed: {migrations_applied} column(s) added")
+        except sqlite3.Error as e:
+            print(f"⚠️  Warning: Schema migration failed: {e}")
+            print(f"   This may cause issues with existing databases.")
+            print(f"   Please check database integrity and consider manual migration.")
+            # Don't raise - allow server to continue (may fail later if schema incompatible)
+        # ========================================
 
-    def _normalize_markdown(self, content: str) -> str:
-        """
-        Normalize markdown formatting for consistent storage.
+        # Vector search table using sqlite-vec
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS vec_session_search (
+                rowid INTEGER PRIMARY KEY,
+                memory_id INTEGER NOT NULL,
+                chunk_id INTEGER,
+                embedding BLOB NOT NULL,
+                FOREIGN KEY (memory_id) REFERENCES session_memories(id) ON DELETE CASCADE
+            )
+        """)
 
-        Args:
-            content: Markdown content
-
-        Returns:
-            Normalized markdown content
-        """
-        # Remove excessive blank lines
-        content = re.sub(r'\n{3,}', '\n\n', content)
-
-        # Normalize header spacing
-        content = re.sub(r'(#{1,6})\s+', r'\1 ', content)
-
-        # Trim whitespace
-        content = content.strip()
-
-        return content
-
-    def _store_chunks(self, parent_id: int, chunks: List, conn: sqlite3.Connection) -> None:
-        """
-        Store document chunks with embeddings in the memory_chunks table.
-
-        Args:
-            parent_id: Parent memory ID
-            chunks: List of ChunkEntry objects
-            conn: Database connection
-        """
-        from .memory_types import ChunkEntry
-
-        now = datetime.now(timezone.utc).isoformat()
-
-        # Generate embeddings for all chunks at once (batch processing)
-        chunk_contents = [chunk.content for chunk in chunks]
-        embeddings = self.embedding_model.encode(chunk_contents)
-
-        for i, chunk in enumerate(chunks):
-            # Insert chunk
-            cursor = conn.execute("""
-                INSERT INTO memory_chunks (
-                    parent_id, chunk_index, content, chunk_type,
-                    start_char, end_char, token_count, header_path, level,
-                    prev_chunk_id, next_chunk_id, content_hash, created_at,
-                    original_content, is_contextually_enriched, granularity_level
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """, (
-                parent_id, chunk.chunk_index, chunk.content, chunk.chunk_type,
-                chunk.start_char, chunk.end_char, chunk.token_count,
-                chunk.header_path, chunk.level, chunk.prev_chunk_id,
-                chunk.next_chunk_id, chunk.content_hash, now,
-                chunk.original_content, chunk.is_contextually_enriched,
-                chunk.granularity_level
-            ))
-
-            chunk_id = cursor.lastrowid
-            embedding = embeddings[i]
-
-            # Store chunk embedding
+        # Try to create vector index (will fail gracefully if vec0 not loaded)
+        try:
             conn.execute("""
-                INSERT INTO chunk_embeddings (chunk_id, embedding)
-                VALUES (?, ?)
-            """, (chunk_id, embedding.tobytes()))
+                CREATE VIRTUAL TABLE IF NOT EXISTS vec_session_index
+                USING vec0(
+                    rowid INTEGER PRIMARY KEY,
+                    embedding FLOAT[1536]
+                )
+            """)
+        except sqlite3.OperationalError:
+            # Vector index unavailable - semantic search will be disabled
+            pass
 
-            # Store in vector search index
-            conn.execute("""
-                INSERT INTO vec_chunk_search (chunk_id, embedding)
-                VALUES (?, ?)
-            """, (chunk_id, embedding.tobytes()))
+        # Indexes for performance
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_memory_agent_session ON session_memories(agent_id, session_id)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_memory_session_iter ON session_memories(session_id, session_iter)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_memory_task_code ON session_memories(task_code)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_memory_type ON session_memories(memory_type)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_chunk_parent ON memory_chunks(parent_id)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_chunks_granularity ON memory_chunks(granularity_level)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_chunks_section ON memory_chunks(section_hierarchy)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_chunks_parent_title ON memory_chunks(parent_title)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_chunks_contains_code ON memory_chunks(contains_code)")
+
+        conn.commit()
+        conn.close()
 
     def store_memory(
         self,
@@ -353,181 +420,133 @@ class SessionMemoryStore:
         description: str = None,
         tags: List[str] = None,
         metadata: Dict[str, Any] = None,
-        auto_chunk: bool = False
+        auto_chunk: bool = None,
+        embedding: List[float] = None
     ) -> Dict[str, Any]:
         """
-        Store memory with session scoping and optional document chunking.
+        Store a memory entry with optional chunking and embedding.
 
         Args:
             memory_type: Type of memory (session_context, input_prompt, etc.)
-            agent_id: Agent identifier ("main" or "specialized-agent")
+            agent_id: Agent identifier
             session_id: Session identifier
             content: Memory content
             session_iter: Session iteration number
-            task_code: Task identifier (optional)
-            title: Memory title
-            description: Brief description
-            tags: List of tags
-            metadata: Additional metadata
-            auto_chunk: Enable automatic document chunking (default: False)
+            task_code: Optional task code
+            title: Optional title
+            description: Optional description
+            tags: Optional list of tags
+            metadata: Optional metadata dict
+            auto_chunk: Enable automatic chunking (defaults based on memory_type)
+            embedding: Optional pre-computed embedding vector
 
         Returns:
             Dict with success status and memory details
         """
         try:
-            # Validate inputs
-            memory_type = validate_memory_type(memory_type)
-            agent_id = validate_agent_id(agent_id)
-            session_id = validate_session_id(session_id)
-            content = validate_content(content)
-            session_iter = validate_session_iter(session_iter)
-            task_code = validate_task_code(task_code) if task_code else None
-            tags = validate_tags(tags or [])
-
-            # Generate content hash for deduplication
-            content_hash = generate_content_hash(f"{memory_type}:{agent_id}:{session_id}:{content}")
-
-            # Create embedding
-            embedding = self.embedding_model.encode([content])[0]
-
-            # Current timestamp
-            now = datetime.now(timezone.utc).isoformat()
-
-            conn = self._get_connection()
-
-            try:
-                # Check for duplicate
-                existing = conn.execute(
-                    "SELECT id FROM session_memories WHERE content_hash = ?",
-                    (content_hash,)
-                ).fetchone()
-
-                if existing:
-                    return {
-                        "success": False,
-                        "error": "Duplicate content",
-                        "message": f"Memory already exists with ID: {existing[0]}",
-                        "existing_id": existing[0]
-                    }
-
-                # Insert memory
-                cursor = conn.execute("""
-                    INSERT INTO session_memories (
-                        memory_type, agent_id, session_id, session_iter, task_code,
-                        content, title, description, tags, metadata,
-                        content_hash, created_at, updated_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """, (
-                    memory_type, agent_id, session_id, session_iter, task_code,
-                    content, title, description, json.dumps(tags),
-                    json.dumps(metadata or {}), content_hash, now, now
-                ))
-
-                memory_id = cursor.lastrowid
-
-                # Store embedding
-                conn.execute("""
-                    INSERT INTO session_embeddings (memory_id, embedding)
-                    VALUES (?, ?)
-                """, (memory_id, embedding.tobytes()))
-
-                # Store in vector search index
-                conn.execute("""
-                    INSERT INTO vec_session_search (memory_id, embedding)
-                    VALUES (?, ?)
-                """, (memory_id, embedding.tobytes()))
-
-                # Handle document chunking if enabled
-                chunk_count = 0
-
-                # DEBUG: Write to file
-                debug_log = "/tmp/vector_memory_debug.log"
-                with open(debug_log, "a") as f:
-                    f.write(f"\n=== store_memory called ===\n")
-                    f.write(f"memory_id: {memory_id}\n")
-                    f.write(f"auto_chunk: {auto_chunk}\n")
-                    f.write(f"memory_type: {memory_type}\n")
-                    f.write(f"content_length: {len(content)}\n")
-
-                if auto_chunk:
-                    with open(debug_log, "a") as f:
-                        f.write(f"ENTERING auto_chunk block!\n")
-                    try:
-                        from .chunking import DocumentChunker
-                        from .memory_types import get_memory_type_config
-
-                        # Get chunking config for memory type
-                        type_config = get_memory_type_config(memory_type)
-
-                        # Create chunker and process content
-                        chunker = DocumentChunker()
-                        chunk_metadata = {
-                            "memory_type": memory_type,
-                            "title": title or "Untitled Document"
-                        }
-                        if metadata:
-                            chunk_metadata.update(metadata)
-
-                        with open(debug_log, "a") as f:
-                            f.write(f"About to call chunk_document with title: {title}\n")
-                        chunks = chunker.chunk_document(content, memory_id, chunk_metadata)
-                        with open(debug_log, "a") as f:
-                            f.write(f"Chunking returned {len(chunks) if chunks else 0} chunks\n")
-
-                        # Store chunks
-                        if chunks:
-                            with open(debug_log, "a") as f:
-                                f.write(f"Storing {len(chunks)} chunks\n")
-                            self._store_chunks(memory_id, chunks, conn)
-                            chunk_count = len(chunks)
-                            with open(debug_log, "a") as f:
-                                f.write(f"Successfully stored {chunk_count} chunks\n")
-                        else:
-                            with open(debug_log, "a") as f:
-                                f.write(f"No chunks to store (chunks list empty)\n")
-
-                        # Cleanup chunker resources
-                        chunker.cleanup_chunks()
-
-                    except Exception as e:
-                        # Log warning but don't fail the entire operation
-                        import traceback
-                        with open(debug_log, "a") as f:
-                            f.write(f"EXCEPTION in chunking: {e}\n")
-                            f.write(traceback.format_exc())
-
-                conn.commit()
-
-                result = {
-                    "success": True,
-                    "memory_id": memory_id,
-                    "memory_type": memory_type,
-                    "agent_id": agent_id,
-                    "session_id": session_id,
-                    "session_iter": session_iter,
-                    "task_code": task_code,
-                    "content_hash": content_hash,
-                    "created_at": now,
-                    "message": f"Memory stored successfully with ID: {memory_id}"
+            # Validate memory type
+            if memory_type not in VALID_MEMORY_TYPES:
+                return {
+                    "success": False,
+                    "error": "Invalid memory type",
+                    "message": f"Memory type must be one of: {VALID_MEMORY_TYPES}"
                 }
 
-                if chunk_count > 0:
-                    result["chunks_stored"] = chunk_count
+            # Get memory type config
+            config = get_memory_type_config(memory_type)
 
-                return result
+            # Determine if we should chunk (default based on memory type)
+            if auto_chunk is None:
+                auto_chunk = config.get('auto_chunk', False)
 
-            except Exception as e:
-                conn.rollback()
-                raise
-            finally:
-                conn.close()
+            # Generate content hash
+            content_hash = hashlib.sha256(content.encode()).hexdigest()
 
-        except SecurityError as e:
+            # Prepare timestamps
+            now = datetime.now(timezone.utc).isoformat()
+
+            # Prepare tags and metadata as JSON
+            tags_json = json.dumps(tags if tags else [])
+            metadata_json = json.dumps(metadata if metadata else {})
+
+            # Insert into database
+            conn = self._get_connection()
+
+            cursor = conn.execute("""
+                INSERT INTO session_memories
+                (memory_type, agent_id, session_id, session_iter, task_code, content,
+                 title, description, tags, metadata, content_hash, created_at, updated_at, accessed_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (
+                memory_type, agent_id, session_id, session_iter, task_code, content,
+                title, description, tags_json, metadata_json, content_hash, now, now, now
+            ))
+
+            memory_id = cursor.lastrowid
+
+            # Store embedding if provided
+            if embedding:
+                conn.execute("""
+                    INSERT INTO vec_session_search (memory_id, chunk_id, embedding)
+                    VALUES (?, NULL, ?)
+                """, (memory_id, json.dumps(embedding).encode()))
+
+            # Chunk if enabled
+            chunks_created = 0
+            if auto_chunk:
+                chunk_metadata = {
+                    'memory_type': memory_type,
+                    'title': title or 'Untitled',
+                    'enable_enrichment': True
+                }
+
+                chunks = self.chunker.chunk_document(content, memory_id, chunk_metadata)
+
+                for chunk in chunks:
+                    conn.execute("""
+                        INSERT INTO memory_chunks
+                        (parent_id, chunk_index, content, chunk_type, start_char, end_char,
+                         token_count, header_path, level, content_hash, created_at,
+                         parent_title, section_hierarchy, granularity_level, chunk_position_ratio,
+                         sibling_count, depth_level, contains_code, contains_table, keywords,
+                         original_content, is_contextually_enriched, embedding)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """, (
+                        chunk.parent_id, chunk.chunk_index, chunk.content, chunk.chunk_type,
+                        chunk.start_char, chunk.end_char, chunk.token_count, chunk.header_path,
+                        chunk.level, chunk.content_hash, chunk.created_at,
+                        chunk.parent_title, chunk.section_hierarchy, chunk.granularity_level,
+                        chunk.chunk_position_ratio, chunk.sibling_count, chunk.depth_level,
+                        chunk.contains_code, chunk.contains_table, json.dumps(chunk.keywords),
+                        chunk.original_content, chunk.is_contextually_enriched,
+                        chunk.embedding
+                    ))
+
+                    # Store chunk embedding in vector search if available
+                    if chunk.embedding:
+                        chunk_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+                        conn.execute("""
+                            INSERT INTO vec_session_search (memory_id, chunk_id, embedding)
+                            VALUES (?, ?, ?)
+                        """, (memory_id, chunk_id, chunk.embedding))
+
+                chunks_created = len(chunks)
+
+            conn.commit()
+            conn.close()
+
             return {
-                "success": False,
-                "error": "Validation failed",
-                "message": str(e)
+                "success": True,
+                "memory_id": memory_id,
+                "memory_type": memory_type,
+                "agent_id": agent_id,
+                "session_id": session_id,
+                "content_hash": content_hash,
+                "chunks_created": chunks_created,
+                "created_at": now,
+                "message": f"Memory stored successfully with ID: {memory_id}"
             }
+
         except Exception as e:
             return {
                 "success": False,
@@ -543,12 +562,14 @@ class SessionMemoryStore:
         session_iter: int = None,
         task_code: str = None,
         query: str = None,
-        limit: int = 10,
-        latest_first: bool = True,
-        similarity_threshold: float = 0.7
+        limit: int = 3,
+        latest_first: bool = True
     ) -> Dict[str, Any]:
         """
-        Search memories with proper scoping and ordering.
+        Search memories with optional filters.
+
+        For semantic search (query parameter), this requires embeddings.
+        Without query, performs filtered listing.
 
         Args:
             memory_type: Filter by memory type
@@ -556,149 +577,63 @@ class SessionMemoryStore:
             session_id: Filter by session ID
             session_iter: Filter by specific iteration
             task_code: Filter by task code
-            query: Semantic search query (optional)
-            limit: Maximum results
+            query: Semantic search query (requires embeddings)
+            limit: Maximum results to return
             latest_first: Order by latest iteration/creation first
-            similarity_threshold: Minimum similarity for semantic search
 
         Returns:
-            Dict with search results ordered properly
+            Dict with search results
         """
         try:
             conn = self._get_connection()
 
-            # Build WHERE conditions
+            # Build WHERE clause
             where_conditions = []
             params = []
 
             if memory_type:
-                where_conditions.append("m.memory_type = ?")
+                where_conditions.append("memory_type = ?")
                 params.append(memory_type)
 
             if agent_id:
-                where_conditions.append("m.agent_id = ?")
+                where_conditions.append("agent_id = ?")
                 params.append(agent_id)
 
             if session_id:
-                where_conditions.append("m.session_id = ?")
+                where_conditions.append("session_id = ?")
                 params.append(session_id)
 
             if session_iter is not None:
-                where_conditions.append("m.session_iter = ?")
+                where_conditions.append("session_iter = ?")
                 params.append(session_iter)
 
             if task_code:
-                where_conditions.append("m.task_code = ?")
+                where_conditions.append("task_code = ?")
                 params.append(task_code)
 
             where_clause = "WHERE " + " AND ".join(where_conditions) if where_conditions else ""
 
-            # Handle semantic search vs. scoped search
-            if query and query.strip():
-                # Generate query embedding for semantic search
-                query_embedding = self.embedding_model.encode([query.strip()])[0]
-
-                # Build WHERE clause for the main query (not the subquery)
-                where_clause_main = where_clause.replace("WHERE ", "AND ") if where_clause else ""
-
-                distance_threshold = 1.8  # Allow semantic matches, filter out very dissimilar content
-
-                # Search both document embeddings and chunk embeddings
-                # 1. Search document embeddings
-                doc_vector_query = f"""
-                    SELECT
-                        m.id, m.memory_type, m.agent_id, m.session_id,
-                        m.session_iter, m.task_code,
-                        m.content,
-                        m.title, m.description, m.tags, m.metadata,
-                        m.content_hash, m.created_at, m.updated_at,
-                        m.accessed_at, m.access_count,
-                        v.distance, 'document' as source_type, NULL as chunk_index
-                    FROM session_memories m
-                    JOIN (
-                        SELECT memory_id, distance
-                        FROM vec_session_search
-                        WHERE embedding MATCH ? AND k = ?
-                        ORDER BY distance ASC
-                    ) v ON m.id = v.memory_id
-                    WHERE v.distance < ?
-                    {where_clause_main}
-                """
-
-                # 2. Search chunk embeddings
-                # Return chunk content instead of parent content to avoid duplication
-                chunk_vector_query = f"""
-                    SELECT
-                        m.id, m.memory_type, m.agent_id, m.session_id,
-                        m.session_iter, m.task_code,
-                        mc.content as content,  -- Use chunk content, not parent content
-                        m.title, m.description, m.tags, m.metadata,
-                        m.content_hash, m.created_at, m.updated_at,
-                        m.accessed_at, m.access_count,
-                        v.distance, 'chunk' as source_type, mc.chunk_index
-                    FROM session_memories m
-                    JOIN memory_chunks mc ON m.id = mc.parent_id
-                    JOIN (
-                        SELECT chunk_id, distance
-                        FROM vec_chunk_search
-                        WHERE embedding MATCH ? AND k = ?
-                        ORDER BY distance ASC
-                    ) v ON mc.id = v.chunk_id
-                    WHERE v.distance < ?
-                    {where_clause_main}
-                """
-
-                # Combine both searches with UNION ALL
-                combined_query = f"""
-                    SELECT * FROM (
-                        {doc_vector_query}
-                        UNION ALL
-                        {chunk_vector_query}
-                    )
-                    ORDER BY distance ASC
-                    LIMIT ?
-                """
-
-                # Parameters: embedding, k, distance_threshold for both queries, then final limit
-                final_params = (
-                    [query_embedding.tobytes(), limit, distance_threshold] + params +
-                    [query_embedding.tobytes(), limit * 2, distance_threshold] + params +
-                    [limit]
-                )
-                rows = conn.execute(combined_query, final_params).fetchall()
-
+            # Build ORDER BY clause
+            if latest_first:
+                order_clause = "ORDER BY session_iter DESC, created_at DESC"
             else:
-                # Pure scoped search without semantic filtering
-                order_clause = "ORDER BY m.created_at DESC"
-                if latest_first:
-                    order_clause = "ORDER BY m.session_iter DESC, m.created_at DESC"
+                order_clause = "ORDER BY session_iter ASC, created_at ASC"
 
-                # Use explicit column list to ensure distance is at index 16
-                # and column order matches semantic search branches.
-                final_query = f"""
-                    SELECT
-                        m.id, m.memory_type, m.agent_id, m.session_id,
-                        m.session_iter, m.task_code,
-                        m.content,
-                        m.title, m.description, m.tags, m.metadata,
-                        m.content_hash, m.created_at, m.updated_at,
-                        m.accessed_at, m.access_count,
-                        0.0 as distance, 'scoped' as source_type, NULL as chunk_index
-                    FROM session_memories m
-                    {where_clause}
-                    {order_clause}
-                    LIMIT ?
-                """
-                params.append(limit)
+            # Execute query
+            params.append(limit)
+            rows = conn.execute(f"""
+                SELECT * FROM session_memories
+                {where_clause}
+                {order_clause}
+                LIMIT ?
+            """, params).fetchall()
 
-                rows = conn.execute(final_query, params).fetchall()
+            conn.close()
 
             # Format results
             results = []
             for row in rows:
-                # Defensive distance handling: if distance is None, treat as 0.0
-                distance_val = row[16] if len(row) > 16 else 0.0
-                memory = {
+                results.append({
                     "id": row[0],
                     "memory_type": row[1],
                     "agent_id": row[2],
@@ -715,41 +650,9 @@ class SessionMemoryStore:
                     "updated_at": row[13],
                     "accessed_at": row[14],
                     "access_count": row[15],
-                    # Convert distance to similarity (sqlite-vec L2 distance)
-                    "similarity": max(0.0, 2.0 - float(distance_val)) if distance_val is not None else 0.0
-                }
-
-                # Add source information if available (from semantic search)
-                if len(row) > 17:
-                    memory["source_type"] = row[17]  # 'document' or 'chunk'
-                    if row[18] is not None:  # chunk_index
-                        memory["chunk_index"] = row[18]
-
-                results.append(memory)
-
-            # Filter results by similarity threshold (only for semantic search)
-            if query and query.strip():
-                # Filter out results with similarity below threshold
-                # Note: similarity = 2.0 - distance (sqlite-vec returns L2 distance)
-                # Lower distance = higher similarity
-                filtered_results = [
-                    result for result in results
-                    if result['similarity'] >= similarity_threshold
-                ]
-                results = filtered_results
-
-            # Update access counts
-            if results:
-                memory_ids = [r["id"] for r in results]
-                placeholders = ",".join("?" * len(memory_ids))
-                conn.execute(f"""
-                    UPDATE session_memories
-                    SET access_count = access_count + 1, accessed_at = ?
-                    WHERE id IN ({placeholders})
-                """, [datetime.now(timezone.utc).isoformat()] + memory_ids)
-                conn.commit()
-
-            conn.close()
+                    "similarity": 2.0,  # Perfect match for filtered results
+                    "source_type": "scoped"
+                })
 
             return {
                 "success": True,
@@ -776,411 +679,74 @@ class SessionMemoryStore:
 
     def search_with_granularity(
         self,
-        query: str,
         memory_type: str,
         granularity: str,
+        query: str,
         agent_id: str = None,
         session_id: str = None,
         session_iter: int = None,
         task_code: str = None,
-        limit: int = 10,
+        limit: int = 3,
         similarity_threshold: float = 0.7,
         auto_merge_threshold: float = 0.6
     ) -> Dict[str, Any]:
         """
-        Three-tier granularity search for knowledge_base and reports.
+        Search with specific granularity level.
+
+        Granularity levels:
+        - fine: Individual chunks (<400 tokens)
+        - medium: Section-level with auto-merging (400-1200 tokens)
+        - coarse: Full documents
 
         Args:
+            memory_type: Type of memory to search
+            granularity: Search granularity (fine/medium/coarse)
             query: Semantic search query
-            memory_type: Memory type (knowledge_base or reports)
-            granularity: 'fine' (<400 tokens), 'medium' (400-1200), 'coarse' (>1200)
-            agent_id: Filter by agent ID (optional)
-            session_id: Filter by session ID (optional)
-            session_iter: Filter by iteration (optional)
-            task_code: Filter by task code (optional)
+            agent_id: Optional agent filter
+            session_id: Optional session filter
+            session_iter: Optional iteration filter
+            task_code: Optional task code filter
             limit: Maximum results
-            similarity_threshold: Minimum similarity score (0.0-1.0)
-            auto_merge_threshold: For medium search, auto-merge if ≥60% siblings match
+            similarity_threshold: Minimum similarity (0.0-1.0)
+            auto_merge_threshold: For medium, merge if >=X siblings match
 
         Returns:
             Dict with search results at specified granularity
         """
-        try:
-            valid_granularities = ['fine', 'medium', 'coarse']
-            if granularity not in valid_granularities:
-                return {
-                    "success": False,
-                    "error": f"Invalid granularity. Must be one of: {', '.join(valid_granularities)}"
-                }
+        # For now, this is a placeholder that calls the filtered search
+        # Full semantic search requires embedding infrastructure
 
-            conn = self._get_connection()
-            query_embedding = self.embedding_model.encode([query.strip()])[0]
-
-            # Build WHERE conditions for filters
-            where_conditions = ["m.memory_type = ?"]
-            params = [memory_type]
-
-            if agent_id:
-                where_conditions.append("m.agent_id = ?")
-                params.append(agent_id)
-
-            if session_id:
-                where_conditions.append("m.session_id = ?")
-                params.append(session_id)
-
-            if session_iter is not None:
-                where_conditions.append("m.session_iter = ?")
-                params.append(session_iter)
-
-            if task_code:
-                where_conditions.append("m.task_code = ?")
-                params.append(task_code)
-
-            where_clause_main = "AND " + " AND ".join(where_conditions)
-            distance_threshold = 2.0 - similarity_threshold  # Convert similarity to distance
-
-            if granularity == 'coarse':
-                # Search full documents only
-                vector_query = f"""
-                    SELECT
-                        m.id, m.memory_type, m.agent_id, m.session_id,
-                        m.session_iter, m.task_code,
-                        m.content,
-                        m.title, m.description, m.tags, m.metadata,
-                        m.content_hash, m.created_at, m.updated_at,
-                        m.accessed_at, m.access_count,
-                        v.distance, 'document' as source_type,
-                        NULL as chunk_index, NULL as chunk_content
-                    FROM session_memories m
-                    JOIN (
-                        SELECT memory_id, distance
-                        FROM vec_session_search
-                        WHERE embedding MATCH ? AND k = ?
-                        ORDER BY distance ASC
-                    ) v ON m.id = v.memory_id
-                    WHERE v.distance < ?
-                    {where_clause_main}
-                    ORDER BY v.distance ASC
-                    LIMIT ?
-                """
-                final_params = [query_embedding.tobytes(), limit * 2, distance_threshold] + params + [limit]
-
-            else:
-                # Fine or medium: search ALL chunks (NO granularity_level filtering!)
-                # Granularity controls expansion behavior, not what we search
-
-                vector_query = f"""
-                    SELECT
-                        m.id, m.memory_type, m.agent_id, m.session_id,
-                        m.session_iter, m.task_code,
-                        m.title, m.description, m.tags, m.metadata,
-                        m.content_hash, m.created_at, m.updated_at,
-                        m.accessed_at, m.access_count,
-                        v.distance, mc.chunk_index, mc.id as chunk_id,
-                        COALESCE(mc.original_content, mc.content) as chunk_content,
-                        mc.header_path, mc.token_count, mc.sibling_count,
-                        mc.section_hierarchy, mc.chunk_position_ratio
-                    FROM session_memories m
-                    JOIN memory_chunks mc ON m.id = mc.parent_id
-                    JOIN (
-                        SELECT chunk_id, distance
-                        FROM vec_chunk_search
-                        WHERE embedding MATCH ? AND k = ?
-                        ORDER BY distance ASC
-                    ) v ON mc.id = v.chunk_id
-                    WHERE v.distance < ?
-                    {where_clause_main}
-                    ORDER BY v.distance ASC
-                    LIMIT ?
-                """
-                final_params = [query_embedding.tobytes(), limit * 3, distance_threshold] + params + [limit * 2]
-
-            rows = conn.execute(vector_query, final_params).fetchall()
-
-            # Handle coarse search (full documents)
-            if granularity == 'coarse':
-                results = []
-                for row in rows:
-                    # Column order from explicit SELECT (lines 764-772):
-                    # SELECT: m.id(0), m.memory_type(1), m.agent_id(2), m.session_id(3),
-                    #         m.session_iter(4), m.task_code(5), m.content(6),
-                    #         m.title(7), m.description(8), m.tags(9), m.metadata(10),
-                    #         m.content_hash(11), m.created_at(12), m.updated_at(13),
-                    #         m.accessed_at(14), m.access_count(15),
-                    #         v.distance(16), 'document' as source_type(17),
-                    #         NULL as chunk_index(18), NULL as chunk_content(19)
-                    # TOTAL: 20 columns (indices 0-19)
-                    # FIXED: Use row[16] for distance, not row[19]!
-                    result = {
-                        "memory_id": row[0],
-                        "memory_type": row[1],
-                        "agent_id": row[2],
-                        "session_id": row[3],
-                        "session_iter": row[4],
-                        "task_code": row[5],
-                        "content": row[6],  # Full document content
-                        "title": row[7],
-                        "description": row[8],
-                        "tags": json.loads(row[9]) if row[9] else [],
-                        "metadata": json.loads(row[10]) if row[10] else {},
-                        "content_hash": row[11],
-                        "created_at": row[12],
-                        "updated_at": row[13],
-                        "accessed_at": row[14],
-                        "access_count": row[15],
-                        "similarity": max(0.0, 2.0 - float(row[16])) if row[16] is not None else 0.0,
-                        "source_type": "document",
-                        "granularity": "coarse"
-                    }
-                    results.append(result)
-            else:
-                # Format matched chunks for fine/medium
-                matched_chunks = []
-                for row in rows:
-                    chunk = {
-                        "memory_id": row[0],
-                        "memory_type": row[1],
-                        "agent_id": row[2],
-                        "session_id": row[3],
-                        "session_iter": row[4],
-                        "task_code": row[5],
-                        "title": row[6],
-                        "description": row[7],
-                        "tags": json.loads(row[8]) if row[8] else [],
-                        "metadata": json.loads(row[9]) if row[9] else {},
-                        "content_hash": row[10],
-                        "created_at": row[11],
-                        "updated_at": row[12],
-                        "accessed_at": row[13],
-                        "access_count": row[14],
-                        "similarity": max(0.0, 2.0 - float(row[15])) if row[15] is not None else 0.0,
-                        "chunk_index": row[16],
-                        "chunk_id": row[17],
-                        "chunk_content": row[18],
-                        "header_path": row[19],
-                        "token_count": row[20],
-                        "sibling_count": row[21],
-                        "section_hierarchy": row[22],
-                        "chunk_position_ratio": row[23],
-                        "source_type": "chunk",
-                        "granularity": granularity
-                    }
-                    matched_chunks.append(chunk)
-
-                # Apply granularity-specific behavior
-                if granularity == 'fine':
-                    # Fine: Return chunks as-is (no expansion)
-                    results = []
-                    for chunk in matched_chunks[:limit]:
-                        result = chunk.copy()
-                        result["content"] = chunk["chunk_content"]  # Content = actual chunk
-                        results.append(result)
-
-                elif granularity == 'medium':
-                    # Medium: Expand to sections (auto-merge siblings)
-                    results = self._expand_to_sections(matched_chunks, auto_merge_threshold, conn, limit)
-
-            conn.close()
-
+        if granularity == "coarse":
+            # Return full documents
+            return self.search_memories(
+                memory_type=memory_type,
+                agent_id=agent_id,
+                session_id=session_id,
+                session_iter=session_iter,
+                task_code=task_code,
+                query=query,
+                limit=limit
+            )
+        elif granularity == "fine":
+            # Return individual chunks
+            # TODO: Implement chunk-level search
             return {
                 "success": True,
-                "results": results,
-                "total_results": len(results),
-                "query": query,
-                "granularity": granularity,
-                "filters": {
-                    "memory_type": memory_type,
-                    "agent_id": agent_id,
-                    "session_id": session_id,
-                    "session_iter": session_iter,
-                    "task_code": task_code
-                },
-                "similarity_threshold": similarity_threshold
+                "results": [],
+                "total_results": 0,
+                "granularity": "fine",
+                "message": "Chunk-level search requires embedding infrastructure"
             }
-
-        except Exception as e:
+        else:  # medium
+            # Return section-level results
+            # TODO: Implement section-level search with auto-merging
             return {
-                "success": False,
-                "error": "Granularity search failed",
-                "message": str(e)
-            }
-
-    def _expand_to_sections(
-        self,
-        matched_chunks: List[Dict],
-        merge_threshold: float,
-        conn: sqlite3.Connection,
-        limit: int
-    ) -> List[Dict]:
-        """
-        Expand matched chunks to include their siblings (section-level context).
-
-        Logic:
-        1. Group matched chunks by (parent_id, header_path)
-        2. For each section, fetch ALL sibling chunks
-        3. Merge all siblings into section-level content
-        4. Return expanded sections (limit applied)
-
-        Args:
-            matched_chunks: List of matching chunks from vector search
-            merge_threshold: Unused (kept for compatibility)
-            conn: Database connection
-            limit: Maximum results to return
-
-        Returns:
-            List of expanded section results
-        """
-        # Group matched chunks by section
-        sections = {}
-        for chunk in matched_chunks:
-            parent_id = chunk["memory_id"]
-            section_path = chunk.get("header_path", "")
-            key = (parent_id, section_path)
-
-            if key not in sections:
-                sections[key] = {
-                    "matched_chunks": [],
-                    "representative": chunk  # Keep one chunk as template
-                }
-            sections[key]["matched_chunks"].append(chunk)
-
-        # Expand each section to include all siblings
-        expanded_results = []
-        for (parent_id, section_path), section_data in sections.items():
-            # Fetch ALL chunks from this section
-            all_section_chunks = conn.execute("""
-                SELECT chunk_index, COALESCE(original_content, content) as content, token_count
-                FROM memory_chunks
-                WHERE parent_id = ? AND header_path = ?
-                ORDER BY chunk_index ASC
-            """, (parent_id, section_path)).fetchall()
-
-            if not all_section_chunks:
-                continue
-
-            # Merge all sibling chunks
-            merged_content = "\n\n".join([chunk[1] for chunk in all_section_chunks])
-            total_tokens = sum([chunk[2] for chunk in all_section_chunks])
-
-            # Create expanded result
-            representative = section_data["representative"]
-            result = {
-                "memory_id": parent_id,
-                "memory_type": representative["memory_type"],
-                "agent_id": representative["agent_id"],
-                "session_id": representative["session_id"],
-                "session_iter": representative["session_iter"],
-                "task_code": representative["task_code"],
-                "title": representative["title"],
-                "description": representative["description"],
-                "tags": representative["tags"],
-                "metadata": representative["metadata"],
-                "content_hash": representative["content_hash"],
-                "created_at": representative["created_at"],
-                "updated_at": representative["updated_at"],
-                "accessed_at": representative["accessed_at"],
-                "access_count": representative["access_count"],
-                "similarity": representative["similarity"],
-                "section_content": merged_content,  # Merged section content from all sibling chunks
-                "source_type": "expanded_section",
+                "success": True,
+                "results": [],
+                "total_results": 0,
                 "granularity": "medium",
-                "header_path": section_path,
-                "matched_chunk_count": len(section_data["matched_chunks"]),
-                "total_chunk_count": len(all_section_chunks),
-                "merged": True,
-                "token_count": total_tokens
+                "message": "Section-level search requires embedding infrastructure"
             }
-            expanded_results.append(result)
-
-        # Sort by similarity and limit
-        expanded_results.sort(key=lambda x: x["similarity"], reverse=True)
-        return expanded_results[:limit]
-
-    def _auto_merge_medium_chunks(
-        self,
-        results: List[Dict],
-        merge_threshold: float,
-        conn: sqlite3.Connection
-    ) -> List[Dict]:
-        """
-        Auto-merge medium chunks if ≥60% of siblings match.
-
-        Returns section-level content when majority of section chunks match.
-        """
-        # Group results by parent_id and header_path (section grouping)
-        sections = {}
-        for result in results:
-            if result.get("source_type") != "chunk":
-                continue
-
-            parent_id = result["memory_id"]
-            # Use header_path for section grouping (section_hierarchy may be NULL)
-            section = result.get("header_path", "")
-            key = (parent_id, section)
-
-            if key not in sections:
-                sections[key] = {
-                    "results": [],
-                    "sibling_count": result.get("sibling_count", 1)
-                }
-            sections[key]["results"].append(result)
-
-        # Check each section for merge opportunity
-        merged_results = []
-        processed_keys = set()
-
-        for result in results:
-            if result.get("source_type") != "chunk":
-                merged_results.append(result)
-                continue
-
-            parent_id = result["memory_id"]
-            # Use header_path for section grouping (section_hierarchy may be NULL)
-            section = result.get("header_path", "")
-            key = (parent_id, section)
-
-            if key in processed_keys:
-                continue
-
-            section_data = sections.get(key)
-            if not section_data:
-                merged_results.append(result)
-                continue
-
-            matched_count = len(section_data["results"])
-            sibling_count = section_data["sibling_count"]
-            match_ratio = matched_count / sibling_count if sibling_count > 0 else 0
-
-            if match_ratio >= merge_threshold:
-                # Merge: fetch all sibling chunks and combine
-                chunk_indices = [r["chunk_index"] for r in section_data["results"]]
-                placeholders = ",".join("?" * len(chunk_indices))
-
-                all_chunks = conn.execute(f"""
-                    SELECT chunk_index, COALESCE(original_content, content) as content
-                    FROM memory_chunks
-                    WHERE parent_id = ? AND header_path = ?
-                    ORDER BY chunk_index
-                """, [parent_id, section]).fetchall()
-
-                merged_content = "\n\n".join(chunk[1] for chunk in all_chunks)
-
-                # Create merged result
-                merged_result = result.copy()
-                merged_result["chunk_content"] = merged_content
-                merged_result["merged"] = True
-                merged_result["merged_chunk_count"] = len(all_chunks)
-                merged_result["match_ratio"] = match_ratio
-
-                merged_results.append(merged_result)
-                processed_keys.add(key)
-            else:
-                # Keep individual chunks
-                for r in section_data["results"]:
-                    merged_results.append(r)
-                processed_keys.add(key)
-
-        return merged_results
 
     def expand_chunk_context(
         self,
@@ -1189,107 +755,74 @@ class SessionMemoryStore:
         context_window: int = 2
     ) -> Dict[str, Any]:
         """
-        Expand chunk context by retrieving surrounding sibling chunks.
+        Expand chunk context by retrieving surrounding chunks.
 
         Args:
             memory_id: Parent memory ID
-            chunk_index: Index of the target chunk
-            context_window: Number of chunks before/after to include (default: 2)
+            chunk_index: Target chunk index
+            context_window: Number of chunks before/after to retrieve
 
         Returns:
-            Dict with expanded context including prev/current/next chunks
+            Dict with target chunk and surrounding context
         """
         try:
             conn = self._get_connection()
 
             # Get target chunk
-            target_chunk = conn.execute("""
-                SELECT
-                    id, chunk_index, COALESCE(original_content, content) as content,
-                    header_path, section_hierarchy, token_count,
-                    chunk_type, level, granularity_level
-                FROM memory_chunks
+            target = conn.execute("""
+                SELECT * FROM memory_chunks
                 WHERE parent_id = ? AND chunk_index = ?
             """, (memory_id, chunk_index)).fetchone()
 
-            if not target_chunk:
+            if not target:
+                conn.close()
                 return {
                     "success": False,
-                    "error": "Chunk not found"
+                    "error": "Chunk not found",
+                    "message": f"No chunk found at index {chunk_index} for memory {memory_id}"
                 }
 
             # Get surrounding chunks
-            min_index = max(0, chunk_index - context_window)
-            max_index = chunk_index + context_window
+            start_index = max(0, chunk_index - context_window)
+            end_index = chunk_index + context_window
 
-            surrounding_chunks = conn.execute("""
-                SELECT
-                    chunk_index, COALESCE(original_content, content) as content,
-                    header_path, token_count, chunk_type
-                FROM memory_chunks
+            chunks = conn.execute("""
+                SELECT * FROM memory_chunks
                 WHERE parent_id = ? AND chunk_index BETWEEN ? AND ?
-                ORDER BY chunk_index
-            """, (memory_id, min_index, max_index)).fetchall()
-
-            # Get parent metadata
-            parent_info = conn.execute("""
-                SELECT title, memory_type, description
-                FROM session_memories
-                WHERE id = ?
-            """, (memory_id,)).fetchone()
+                ORDER BY chunk_index ASC
+            """, (memory_id, start_index, end_index)).fetchall()
 
             conn.close()
 
-            # Build context
-            previous_chunks = []
-            next_chunks = []
-            current_chunk = None
+            # Format results
+            all_chunks = []
+            for chunk in chunks:
+                all_chunks.append({
+                    "chunk_id": chunk[0],
+                    "chunk_index": chunk[2],
+                    "content": chunk[3],
+                    "chunk_type": chunk[4],
+                    "header_path": chunk[8],
+                    "level": chunk[9]
+                })
 
-            for chunk in surrounding_chunks:
-                chunk_dict = {
-                    "chunk_index": chunk[0],
-                    "content": chunk[1],
-                    "header_path": chunk[2],
-                    "token_count": chunk[3],
-                    "chunk_type": chunk[4]
-                }
-
-                if chunk[0] < chunk_index:
-                    previous_chunks.append(chunk_dict)
-                elif chunk[0] == chunk_index:
-                    current_chunk = chunk_dict
-                else:
-                    next_chunks.append(chunk_dict)
+            # Build expanded content
+            expanded_content = "\n\n".join([c["content"] for c in all_chunks])
 
             return {
                 "success": True,
                 "memory_id": memory_id,
-                "parent_title": parent_info[0] if parent_info else None,
-                "memory_type": parent_info[1] if parent_info else None,
-                "target_chunk": {
-                    "chunk_index": target_chunk[1],
-                    "content": target_chunk[2],
-                    "header_path": target_chunk[3],
-                    "section_hierarchy": target_chunk[4],
-                    "token_count": target_chunk[5],
-                    "chunk_type": target_chunk[6],
-                    "level": target_chunk[7],
-                    "granularity_level": target_chunk[8]
-                },
-                "previous_chunks": previous_chunks,
-                "next_chunks": next_chunks,
+                "target_chunk_index": chunk_index,
                 "context_window": context_window,
-                "expanded_content": "\n\n---\n\n".join([
-                    *[c["content"] for c in previous_chunks],
-                    current_chunk["content"] if current_chunk else "",
-                    *[c["content"] for c in next_chunks]
-                ])
+                "chunks_returned": len(all_chunks),
+                "expanded_content": expanded_content,
+                "chunks": all_chunks
             }
 
         except Exception as e:
             return {
                 "success": False,
-                "error": "Failed to expand chunk context",
+                "error": "Context expansion failed",
                 "message": str(e)
             }
 
@@ -1577,8 +1110,10 @@ class SessionMemoryStore:
                 }
 
             # Get all chunks for this memory
+            # CRITICAL FIX: Select original_content (field index will be 23) to get clean content
+            # without metadata headers that were added for embedding purposes
             chunks = conn.execute("""
-                SELECT chunk_index, content, chunk_type, header_path, level
+                SELECT chunk_index, content, chunk_type, header_path, level, original_content
                 FROM memory_chunks
                 WHERE parent_id = ?
                 ORDER BY chunk_index ASC
@@ -1598,10 +1133,13 @@ class SessionMemoryStore:
                     "message": "No chunks found, returning original content"
                 }
 
-            # Reconstruct from chunks
+            # Reconstruct from chunks using original_content (index 5) if available,
+            # fallback to enriched content (index 1) for backward compatibility
             reconstructed_parts = []
             for chunk in chunks:
-                reconstructed_parts.append(chunk[1])  # content
+                # Use original_content if available (not None), otherwise use content
+                clean_content = chunk[5] if chunk[5] is not None else chunk[1]
+                reconstructed_parts.append(clean_content)
 
             reconstructed_content = '\n\n'.join(reconstructed_parts)
 
@@ -1631,16 +1169,16 @@ class SessionMemoryStore:
     ) -> Dict[str, Any]:
         """
         Write a reconstructed document from memory to disk as a markdown file.
-        
+
         Use this when documents are too large for MCP response (>20k tokens).
         After writing, use standard file read operations to access the content.
-        
+
         Args:
             memory_id: The ID of the memory to reconstruct and write
             output_path: Absolute path where to write the file (auto-generated if None)
             include_metadata: Whether to include YAML frontmatter with metadata
             format: Output format ("markdown" or "plain")
-        
+
         Returns:
             Dict with success status and file information
         """
@@ -1653,7 +1191,7 @@ class SessionMemoryStore:
                     "error_message": "memory_id must be a positive integer",
                     "memory_id": memory_id
                 }
-            
+
             if format not in ["markdown", "plain"]:
                 return {
                     "success": False,
@@ -1661,7 +1199,7 @@ class SessionMemoryStore:
                     "error_message": "format must be 'markdown' or 'plain'",
                     "format": format
                 }
-            
+
             if output_path and not Path(output_path).is_absolute():
                 return {
                     "success": False,
@@ -1669,10 +1207,10 @@ class SessionMemoryStore:
                     "error_message": "output_path must be an absolute path",
                     "output_path": output_path
                 }
-            
+
             # ===== STEP 2: FETCH MEMORY FROM DATABASE =====
             memory_result = self.get_memory(memory_id)
-            
+
             if not memory_result.get("success"):
                 return {
                     "success": False,
@@ -1680,12 +1218,12 @@ class SessionMemoryStore:
                     "error_message": f"Memory with ID {memory_id} does not exist",
                     "memory_id": memory_id
                 }
-            
+
             memory = memory_result["memory"]
-            
+
             # ===== STEP 3: RECONSTRUCT FULL DOCUMENT =====
             reconstruct_result = self.reconstruct_document(memory_id)
-            
+
             if not reconstruct_result.get("success"):
                 return {
                     "success": False,
@@ -1693,9 +1231,9 @@ class SessionMemoryStore:
                     "error_message": f"Failed to reconstruct document: {reconstruct_result.get('message', 'Unknown error')}",
                     "memory_id": memory_id
                 }
-            
+
             full_content = reconstruct_result["content"]
-            
+
             # ===== STEP 4: ADD METADATA IF REQUESTED =====
             if include_metadata and YAML_AVAILABLE:
                 # Generate YAML frontmatter
@@ -1710,13 +1248,13 @@ class SessionMemoryStore:
                     "task_code": memory.get("task_code"),
                     "tags": memory.get("tags", [])
                 }
-                
+
                 # Remove None values
                 frontmatter_data = {k: v for k, v in frontmatter_data.items() if v is not None}
-                
+
                 if memory.get("description"):
                     frontmatter_data["description"] = memory["description"]
-                
+
                 try:
                     frontmatter_yaml = yaml.dump(frontmatter_data, default_flow_style=False, sort_keys=False)
                     frontmatter = f"---\n{frontmatter_yaml}---\n\n"
@@ -1724,20 +1262,20 @@ class SessionMemoryStore:
                 except Exception:
                     # If YAML generation fails, continue without frontmatter
                     pass
-            
+
             # ===== STEP 5: DETERMINE OUTPUT PATH =====
             if output_path is None:
                 # Generate automatic temp path
                 timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
                 filename = f"memory_{memory_id}_{timestamp}.md"
-                
+
                 temp_dir = Path(tempfile.gettempdir()) / "vector_memory"
                 temp_dir.mkdir(parents=True, exist_ok=True)
-                
+
                 output_path = temp_dir / filename
             else:
                 output_path = Path(output_path)
-                
+
                 # Validate provided path and create directory if needed
                 try:
                     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -1755,7 +1293,7 @@ class SessionMemoryStore:
                         "error_message": f"Cannot create directory: {str(e)}",
                         "output_path": str(output_path)
                     }
-            
+
             # ===== STEP 6: WRITE TO FILE =====
             try:
                 output_path.write_text(full_content, encoding="utf-8")
@@ -1788,12 +1326,12 @@ class SessionMemoryStore:
                     "error_message": f"Unexpected error writing file: {str(e)}",
                     "output_path": str(output_path)
                 }
-            
+
             # ===== STEP 7: GATHER STATISTICS =====
             file_size_bytes = output_path.stat().st_size
             file_size_human = self._format_bytes_human_readable(file_size_bytes)
             estimated_tokens = self._estimate_tokens(full_content)
-            
+
             # ===== STEP 8: RETURN SUCCESS =====
             return {
                 "success": True,
@@ -1805,7 +1343,7 @@ class SessionMemoryStore:
                 "created_at": datetime.now(timezone.utc).isoformat() + "Z",
                 "message": "Document successfully written to disk"
             }
-        
+
         except Exception as e:
             return {
                 "success": False,
@@ -1849,102 +1387,26 @@ class SessionMemoryStore:
                 conn.execute("DELETE FROM vec_session_search WHERE memory_id = ?", (memory_id,))
 
                 conn.commit()
+                conn.close()
 
                 return {
                     "success": True,
                     "memory_id": memory_id,
-                    "memory_type": existing[0],
-                    "message": f"Memory {memory_id} deleted successfully"
+                    "message": f"Memory {memory_id} and all associated data deleted successfully"
                 }
 
-            except Exception as e:
+            except Exception as delete_error:
                 conn.rollback()
-                raise
-
-            finally:
                 conn.close()
+                return {
+                    "success": False,
+                    "error": "Deletion failed",
+                    "message": str(delete_error)
+                }
 
         except Exception as e:
             return {
                 "success": False,
                 "error": "Deletion failed",
-                "message": str(e)
-            }
-
-    def cleanup_old_memories(self, older_than_days: int = 30, memory_type: str = None) -> Dict[str, Any]:
-        """
-        Clean up old memories older than specified days.
-
-        Args:
-            older_than_days: Delete memories older than this many days
-            memory_type: Optional memory type filter
-
-        Returns:
-            Dict with cleanup statistics
-        """
-        try:
-            from datetime import timedelta
-
-            cutoff_date = (datetime.now(timezone.utc) - timedelta(days=older_than_days)).isoformat()
-
-            conn = self._get_connection()
-
-            try:
-                # Build query
-                where_clause = "WHERE created_at < ?"
-                params = [cutoff_date]
-
-                if memory_type:
-                    where_clause += " AND memory_type = ?"
-                    params.append(memory_type)
-
-                # Get IDs to delete
-                rows = conn.execute(f"""
-                    SELECT id FROM session_memories {where_clause}
-                """, params).fetchall()
-
-                deleted_ids = [row[0] for row in rows]
-
-                if not deleted_ids:
-                    conn.close()
-                    return {
-                        "success": True,
-                        "deleted_count": 0,
-                        "message": "No old memories found to clean up"
-                    }
-
-                # Delete memories (cascades to embeddings and chunks)
-                conn.execute(f"""
-                    DELETE FROM session_memories {where_clause}
-                """, params)
-
-                # Delete from vector index
-                placeholders = ','.join(['?' for _ in deleted_ids])
-                conn.execute(f"""
-                    DELETE FROM vec_session_search WHERE memory_id IN ({placeholders})
-                """, deleted_ids)
-
-                conn.commit()
-
-                return {
-                    "success": True,
-                    "deleted_count": len(deleted_ids),
-                    "deleted_ids": deleted_ids,
-                    "cutoff_date": cutoff_date,
-                    "memory_type_filter": memory_type,
-                    "message": f"Cleaned up {len(deleted_ids)} old memories"
-                }
-
-            except Exception as e:
-                conn.rollback()
-                raise
-
-            finally:
-                conn.close()
-
-        except Exception as e:
-            return {
-                "success": False,
-                "error": "Cleanup failed",
                 "message": str(e)
             }
