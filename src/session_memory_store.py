@@ -507,7 +507,33 @@ class SessionMemoryStore:
             tags_json = json.dumps(tags if tags else [])
             metadata_json = json.dumps(metadata if metadata else {})
 
-            # Insert into database
+            # CRITICAL FIX: Do expensive operations (chunking, embedding) BEFORE opening connection
+            # This prevents holding database locks during long-running operations
+            chunks = []
+            chunks_created = 0
+            if auto_chunk:
+                chunk_metadata = {
+                    'memory_type': memory_type,
+                    'title': title or 'Untitled',
+                    'enable_enrichment': True
+                }
+
+                # Chunk document (use placeholder memory_id=0, will update after insert)
+                chunks = self.chunker.chunk_document(content, 0, chunk_metadata)
+
+                # Generate embeddings for all chunks in batch (10-50x faster than sequential)
+                if self.embedding_model and chunks:
+                    chunk_texts = [chunk.content for chunk in chunks]
+                    try:
+                        embeddings = self.embedding_model.encode(chunk_texts, batch_size=32, show_progress_bar=False)
+                        # Convert embeddings to bytes and attach to chunks
+                        for i, chunk in enumerate(chunks):
+                            chunk.embedding = embeddings[i].tobytes()
+                    except Exception as e:
+                        logger.warning(f"Failed to generate embeddings for chunks: {e}")
+                        # Continue without embeddings
+
+            # NOW open connection - all expensive operations are done
             conn = self._get_connection()
 
             try:
@@ -530,60 +556,38 @@ class SessionMemoryStore:
                         VALUES (?, NULL, ?)
                     """, (memory_id, json.dumps(embedding).encode()))
 
-                # Chunk if enabled
-                chunks_created = 0
-                if auto_chunk:
-                    chunk_metadata = {
-                        'memory_type': memory_type,
-                        'title': title or 'Untitled',
-                        'enable_enrichment': True
-                    }
+                # Insert pre-computed chunks
+                for chunk in chunks:
+                    # Update parent_id to actual memory_id
+                    chunk.parent_id = memory_id
+                    conn.execute("""
+                        INSERT INTO memory_chunks
+                        (parent_id, chunk_index, content, chunk_type, start_char, end_char,
+                         token_count, header_path, level, content_hash, created_at,
+                         parent_title, section_hierarchy, granularity_level, chunk_position_ratio,
+                         sibling_count, depth_level, contains_code, contains_table, keywords,
+                         original_content, is_contextually_enriched, embedding)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """, (
+                        chunk.parent_id, chunk.chunk_index, chunk.content, chunk.chunk_type,
+                        chunk.start_char, chunk.end_char, chunk.token_count, chunk.header_path,
+                        chunk.level, chunk.content_hash, chunk.created_at,
+                        chunk.parent_title, chunk.section_hierarchy, chunk.granularity_level,
+                        chunk.chunk_position_ratio, chunk.sibling_count, chunk.depth_level,
+                        chunk.contains_code, chunk.contains_table, json.dumps(chunk.keywords),
+                        chunk.original_content, chunk.is_contextually_enriched,
+                        chunk.embedding
+                    ))
 
-                    chunks = self.chunker.chunk_document(content, memory_id, chunk_metadata)
-
-                    # Generate embeddings for all chunks in batch (10-50x faster than sequential)
-                    if self.embedding_model and chunks:
-                        chunk_texts = [chunk.content for chunk in chunks]
-                        try:
-                            embeddings = self.embedding_model.encode(chunk_texts, batch_size=32, show_progress_bar=False)
-                            # Convert embeddings to bytes and attach to chunks
-                            for i, chunk in enumerate(chunks):
-                                chunk.embedding = embeddings[i].tobytes()
-                        except Exception as e:
-                            import logging
-                            logger = logging.getLogger(__name__)
-                            logger.warning(f"Failed to generate embeddings for chunks: {e}")
-                            # Continue without embeddings
-
-                    for chunk in chunks:
+                    # Store chunk embedding in vector search if available
+                    if chunk.embedding:
+                        chunk_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
                         conn.execute("""
-                            INSERT INTO memory_chunks
-                            (parent_id, chunk_index, content, chunk_type, start_char, end_char,
-                             token_count, header_path, level, content_hash, created_at,
-                             parent_title, section_hierarchy, granularity_level, chunk_position_ratio,
-                             sibling_count, depth_level, contains_code, contains_table, keywords,
-                             original_content, is_contextually_enriched, embedding)
-                            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                        """, (
-                            chunk.parent_id, chunk.chunk_index, chunk.content, chunk.chunk_type,
-                            chunk.start_char, chunk.end_char, chunk.token_count, chunk.header_path,
-                            chunk.level, chunk.content_hash, chunk.created_at,
-                            chunk.parent_title, chunk.section_hierarchy, chunk.granularity_level,
-                            chunk.chunk_position_ratio, chunk.sibling_count, chunk.depth_level,
-                            chunk.contains_code, chunk.contains_table, json.dumps(chunk.keywords),
-                            chunk.original_content, chunk.is_contextually_enriched,
-                            chunk.embedding
-                        ))
+                            INSERT INTO vec_session_search (memory_id, chunk_id, embedding)
+                            VALUES (?, ?, ?)
+                        """, (memory_id, chunk_id, chunk.embedding))
 
-                        # Store chunk embedding in vector search if available
-                        if chunk.embedding:
-                            chunk_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
-                            conn.execute("""
-                                INSERT INTO vec_session_search (memory_id, chunk_id, embedding)
-                                VALUES (?, ?, ?)
-                            """, (memory_id, chunk_id, chunk.embedding))
-
-                    chunks_created = len(chunks)
+                chunks_created = len(chunks)
 
                 conn.commit()
 
