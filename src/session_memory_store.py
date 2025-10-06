@@ -11,10 +11,14 @@ import json
 import time
 import sqlite3
 import hashlib
+import logging
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, Any, List, Optional
 import tempfile
+
+# Initialize logger
+logger = logging.getLogger(__name__)
 
 try:
     import tiktoken
@@ -66,6 +70,9 @@ class SessionMemoryStore:
         # Initialize chunker (lazily, only when needed)
         self._chunker = None
 
+        # Initialize embedding model (lazily, only when needed)
+        self._embedding_model = None
+
     @property
     def chunker(self):
         """Lazy initialization of chunker"""
@@ -85,6 +92,22 @@ class SessionMemoryStore:
             else:
                 self._token_encoder = None
         return self._token_encoder
+
+    @property
+    def embedding_model(self):
+        """Lazy-load embedding model for semantic search."""
+        if self._embedding_model is None:
+            try:
+                from sentence_transformers import SentenceTransformer
+                self._embedding_model = SentenceTransformer(
+                    'all-MiniLM-L6-v2',
+                    device='cpu'
+                )
+                logger.info("Embedding model loaded successfully")
+            except Exception as e:
+                logger.warning(f"Failed to load embedding model: {e}")
+                self._embedding_model = False
+        return self._embedding_model if self._embedding_model is not False else None
 
     def _estimate_tokens(self, text: str) -> int:
         """
@@ -109,8 +132,22 @@ class SessionMemoryStore:
         return f"{size_bytes:.1f} TB"
 
     def _get_connection(self) -> sqlite3.Connection:
-        """Get database connection with extensions loaded"""
+        """
+        Get database connection with extensions loaded.
+
+        Configures busy_timeout to handle concurrent access from multiple processes.
+        This is critical for MCP server usage where the server holds connections
+        while clients make queries.
+
+        Returns:
+            sqlite3.Connection with busy_timeout=5000ms and extensions loaded
+        """
         conn = sqlite3.connect(self.db_path)
+
+        # CRITICAL FIX: Set busy timeout to handle concurrent access
+        # Without this, any lock contention causes immediate "database is locked" error
+        # With 5000ms timeout, SQLite waits for locks instead of failing
+        conn.execute("PRAGMA busy_timeout = 5000")
 
         # Load sqlite-vec extension
         try:
@@ -150,6 +187,7 @@ class SessionMemoryStore:
             pass
 
         return conn
+
 
     def _migrate_schema(self, conn: sqlite3.Connection) -> int:
         """
@@ -472,80 +510,98 @@ class SessionMemoryStore:
             # Insert into database
             conn = self._get_connection()
 
-            cursor = conn.execute("""
-                INSERT INTO session_memories
-                (memory_type, agent_id, session_id, session_iter, task_code, content,
-                 title, description, tags, metadata, content_hash, created_at, updated_at, accessed_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """, (
-                memory_type, agent_id, session_id, session_iter, task_code, content,
-                title, description, tags_json, metadata_json, content_hash, now, now, now
-            ))
+            try:
+                cursor = conn.execute("""
+                    INSERT INTO session_memories
+                    (memory_type, agent_id, session_id, session_iter, task_code, content,
+                     title, description, tags, metadata, content_hash, created_at, updated_at, accessed_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """, (
+                    memory_type, agent_id, session_id, session_iter, task_code, content,
+                    title, description, tags_json, metadata_json, content_hash, now, now, now
+                ))
 
-            memory_id = cursor.lastrowid
+                memory_id = cursor.lastrowid
 
-            # Store embedding if provided
-            if embedding:
-                conn.execute("""
-                    INSERT INTO vec_session_search (memory_id, chunk_id, embedding)
-                    VALUES (?, NULL, ?)
-                """, (memory_id, json.dumps(embedding).encode()))
+                # Store embedding if provided
+                if embedding:
+                    conn.execute("""
+                        INSERT INTO vec_session_search (memory_id, chunk_id, embedding)
+                        VALUES (?, NULL, ?)
+                    """, (memory_id, json.dumps(embedding).encode()))
 
-            # Chunk if enabled
-            chunks_created = 0
-            if auto_chunk:
-                chunk_metadata = {
-                    'memory_type': memory_type,
-                    'title': title or 'Untitled',
-                    'enable_enrichment': True
+                # Chunk if enabled
+                chunks_created = 0
+                if auto_chunk:
+                    chunk_metadata = {
+                        'memory_type': memory_type,
+                        'title': title or 'Untitled',
+                        'enable_enrichment': True
+                    }
+
+                    chunks = self.chunker.chunk_document(content, memory_id, chunk_metadata)
+
+                    # Generate embeddings for all chunks in batch (10-50x faster than sequential)
+                    if self.embedding_model and chunks:
+                        chunk_texts = [chunk.content for chunk in chunks]
+                        try:
+                            embeddings = self.embedding_model.encode(chunk_texts, batch_size=32, show_progress_bar=False)
+                            # Convert embeddings to bytes and attach to chunks
+                            for i, chunk in enumerate(chunks):
+                                chunk.embedding = embeddings[i].tobytes()
+                        except Exception as e:
+                            import logging
+                            logger = logging.getLogger(__name__)
+                            logger.warning(f"Failed to generate embeddings for chunks: {e}")
+                            # Continue without embeddings
+
+                    for chunk in chunks:
+                        conn.execute("""
+                            INSERT INTO memory_chunks
+                            (parent_id, chunk_index, content, chunk_type, start_char, end_char,
+                             token_count, header_path, level, content_hash, created_at,
+                             parent_title, section_hierarchy, granularity_level, chunk_position_ratio,
+                             sibling_count, depth_level, contains_code, contains_table, keywords,
+                             original_content, is_contextually_enriched, embedding)
+                            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        """, (
+                            chunk.parent_id, chunk.chunk_index, chunk.content, chunk.chunk_type,
+                            chunk.start_char, chunk.end_char, chunk.token_count, chunk.header_path,
+                            chunk.level, chunk.content_hash, chunk.created_at,
+                            chunk.parent_title, chunk.section_hierarchy, chunk.granularity_level,
+                            chunk.chunk_position_ratio, chunk.sibling_count, chunk.depth_level,
+                            chunk.contains_code, chunk.contains_table, json.dumps(chunk.keywords),
+                            chunk.original_content, chunk.is_contextually_enriched,
+                            chunk.embedding
+                        ))
+
+                        # Store chunk embedding in vector search if available
+                        if chunk.embedding:
+                            chunk_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+                            conn.execute("""
+                                INSERT INTO vec_session_search (memory_id, chunk_id, embedding)
+                                VALUES (?, ?, ?)
+                            """, (memory_id, chunk_id, chunk.embedding))
+
+                    chunks_created = len(chunks)
+
+                conn.commit()
+
+                return {
+                    "success": True,
+                    "memory_id": memory_id,
+                    "memory_type": memory_type,
+                    "agent_id": agent_id,
+                    "session_id": session_id,
+                    "content_hash": content_hash,
+                    "chunks_created": chunks_created,
+                    "created_at": now,
+                    "message": f"Memory stored successfully with ID: {memory_id}"
                 }
 
-                chunks = self.chunker.chunk_document(content, memory_id, chunk_metadata)
-
-                for chunk in chunks:
-                    conn.execute("""
-                        INSERT INTO memory_chunks
-                        (parent_id, chunk_index, content, chunk_type, start_char, end_char,
-                         token_count, header_path, level, content_hash, created_at,
-                         parent_title, section_hierarchy, granularity_level, chunk_position_ratio,
-                         sibling_count, depth_level, contains_code, contains_table, keywords,
-                         original_content, is_contextually_enriched, embedding)
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    """, (
-                        chunk.parent_id, chunk.chunk_index, chunk.content, chunk.chunk_type,
-                        chunk.start_char, chunk.end_char, chunk.token_count, chunk.header_path,
-                        chunk.level, chunk.content_hash, chunk.created_at,
-                        chunk.parent_title, chunk.section_hierarchy, chunk.granularity_level,
-                        chunk.chunk_position_ratio, chunk.sibling_count, chunk.depth_level,
-                        chunk.contains_code, chunk.contains_table, json.dumps(chunk.keywords),
-                        chunk.original_content, chunk.is_contextually_enriched,
-                        chunk.embedding
-                    ))
-
-                    # Store chunk embedding in vector search if available
-                    if chunk.embedding:
-                        chunk_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
-                        conn.execute("""
-                            INSERT INTO vec_session_search (memory_id, chunk_id, embedding)
-                            VALUES (?, ?, ?)
-                        """, (memory_id, chunk_id, chunk.embedding))
-
-                chunks_created = len(chunks)
-
-            conn.commit()
-            conn.close()
-
-            return {
-                "success": True,
-                "memory_id": memory_id,
-                "memory_type": memory_type,
-                "agent_id": agent_id,
-                "session_id": session_id,
-                "content_hash": content_hash,
-                "chunks_created": chunks_created,
-                "created_at": now,
-                "message": f"Memory stored successfully with ID: {memory_id}"
-            }
+            finally:
+                # CRITICAL: Always close connection, even if an error occurs
+                conn.close()
 
         except Exception as e:
             return {
@@ -1365,21 +1421,20 @@ class SessionMemoryStore:
         try:
             conn = self._get_connection()
 
-            # Check if memory exists
-            existing = conn.execute(
-                "SELECT memory_type FROM session_memories WHERE id = ?",
-                (memory_id,)
-            ).fetchone()
-
-            if not existing:
-                conn.close()
-                return {
-                    "success": False,
-                    "error": "Memory not found",
-                    "message": f"No memory found with ID: {memory_id}"
-                }
-
             try:
+                # Check if memory exists
+                existing = conn.execute(
+                    "SELECT memory_type FROM session_memories WHERE id = ?",
+                    (memory_id,)
+                ).fetchone()
+
+                if not existing:
+                    return {
+                        "success": False,
+                        "error": "Memory not found",
+                        "message": f"No memory found with ID: {memory_id}"
+                    }
+
                 # Delete from session_memories (cascades to embeddings, chunks)
                 conn.execute("DELETE FROM session_memories WHERE id = ?", (memory_id,))
 
@@ -1387,7 +1442,6 @@ class SessionMemoryStore:
                 conn.execute("DELETE FROM vec_session_search WHERE memory_id = ?", (memory_id,))
 
                 conn.commit()
-                conn.close()
 
                 return {
                     "success": True,
@@ -1397,12 +1451,15 @@ class SessionMemoryStore:
 
             except Exception as delete_error:
                 conn.rollback()
-                conn.close()
                 return {
                     "success": False,
                     "error": "Deletion failed",
                     "message": str(delete_error)
                 }
+
+            finally:
+                # CRITICAL: Always close connection, even if an error occurs
+                conn.close()
 
         except Exception as e:
             return {
