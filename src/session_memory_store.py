@@ -567,8 +567,8 @@ class SessionMemoryStore:
                 # Store embedding if provided
                 if embedding:
                     conn.execute("""
-                        INSERT INTO vec_session_search (memory_id, chunk_id, embedding)
-                        VALUES (?, NULL, ?)
+                        INSERT INTO vec_session_search (memory_id, embedding)
+                        VALUES (?, ?)
                     """, (memory_id, json.dumps(embedding).encode()))
 
                 # Insert pre-computed chunks
@@ -598,9 +598,9 @@ class SessionMemoryStore:
                     if chunk.embedding:
                         chunk_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
                         conn.execute("""
-                            INSERT INTO vec_session_search (memory_id, chunk_id, embedding)
-                            VALUES (?, ?, ?)
-                        """, (memory_id, chunk_id, chunk.embedding))
+                            INSERT INTO vec_chunk_search (chunk_id, embedding)
+                            VALUES (?, ?)
+                        """, (chunk_id, chunk.embedding))
 
                 chunks_created = len(chunks)
 
