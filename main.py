@@ -651,6 +651,30 @@ def reconstruct_document(memory_id: int) -> dict[str, Any]:
     """
     return store.reconstruct_document(memory_id)
 
+@mcp.tool()
+def write_document_to_file(
+    memory_id: int,
+    output_path: str = None,
+    include_metadata: bool = True,
+    format: str = "markdown"
+) -> dict[str, Any]:
+    """
+    Write a reconstructed document from memory to disk as a markdown file.
+
+    Use this when documents are too large for MCP response (>20k tokens).
+    After writing, use standard file read operations to access the content.
+
+    Args:
+        memory_id: The ID of the memory to reconstruct and write to file
+        output_path: Absolute path where to write the file. If not provided, generates temp path automatically
+        include_metadata: Whether to include YAML frontmatter with memory metadata (default: True)
+        format: Output format. Options: "markdown", "plain". Default: "markdown"
+
+    Returns:
+        Dict with success status, file_path, file_size, estimated_tokens, and message
+    """
+    return store.write_document_to_file(memory_id, output_path, include_metadata, format)
+
 # ================================
 # THREE-TIER GRANULARITY SEARCH
 # ================================
@@ -1114,6 +1138,7 @@ if __name__ == "__main__":
         print("   🔍 Search: All with proper agent_id + session_id + session_iter scoping", file=sys.stderr)
         print("   🔄 Continuity: load_session_context_for_task", file=sys.stderr)
         print("   📈 Stats: get_session_stats, list_sessions", file=sys.stderr)
+        print("   💾 Document Export: write_document_to_file (for large documents)", file=sys.stderr)
         print("⚡ Proper ordering: session_iter DESC, created_at DESC", file=sys.stderr)
 
         # Run the MCP server

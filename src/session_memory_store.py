@@ -11,6 +11,7 @@ import sqlite_vec
 import json
 import re
 from datetime import datetime, timezone
+import tempfile
 from pathlib import Path
 from typing import List, Optional, Dict, Any, Tuple
 
@@ -25,6 +26,12 @@ try:
     YAML_AVAILABLE = True
 except ImportError:
     YAML_AVAILABLE = False
+
+try:
+    import tiktoken
+    TIKTOKEN_AVAILABLE = True
+except ImportError:
+    TIKTOKEN_AVAILABLE = False
 
 from .config import Config
 from .security import (
@@ -55,6 +62,7 @@ class SessionMemoryStore:
 
         # Initialize embedding model (lazy loading)
         self._embedding_model = None
+        self._token_encoder = None
 
     @property
     def embedding_model(self):
@@ -64,6 +72,45 @@ class SessionMemoryStore:
             from sentence_transformers import SentenceTransformer
             self._embedding_model = SentenceTransformer(self.embedding_model_name)
         return self._embedding_model
+
+    @property
+    def token_encoder(self):
+        """Lazy-loaded cached tiktoken encoder for performance"""
+        if self._token_encoder is None and TIKTOKEN_AVAILABLE:
+            try:
+                self._token_encoder = tiktoken.get_encoding("cl100k_base")
+            except Exception:
+                pass
+        return self._token_encoder
+
+    def _estimate_tokens(self, text: str) -> int:
+        """
+        Estimate token count for text using cached encoder.
+        
+        Args:
+            text: Text to estimate tokens for
+        
+        Returns:
+            Estimated token count
+        """
+        if self.token_encoder:
+            try:
+                return len(self.token_encoder.encode(text))
+            except Exception:
+                pass
+        # Fallback: 1 token ≈ 4 characters
+        return len(text) // 4
+
+    def _format_bytes_human_readable(self, bytes_size: int) -> str:
+        """Format bytes as human-readable string (B/KB/MB/GB)."""
+        if bytes_size < 1024:
+            return f"{bytes_size} B"
+        elif bytes_size < 1024**2:
+            return f"{bytes_size/1024:.1f} KB"
+        elif bytes_size < 1024**3:
+            return f"{bytes_size/1024**2:.1f} MB"
+        else:
+            return f"{bytes_size/1024**3:.1f} GB"
 
     def _get_connection(self) -> sqlite3.Connection:
         """Get database connection with sqlite-vec enabled."""
@@ -626,8 +673,17 @@ class SessionMemoryStore:
                 if latest_first:
                     order_clause = "ORDER BY m.session_iter DESC, m.created_at DESC"
 
+                # Use explicit column list to ensure distance is at index 16
+                # and column order matches semantic search branches.
                 final_query = f"""
-                    SELECT m.*, 0.0 as distance
+                    SELECT
+                        m.id, m.memory_type, m.agent_id, m.session_id,
+                        m.session_iter, m.task_code,
+                        m.content,
+                        m.title, m.description, m.tags, m.metadata,
+                        m.content_hash, m.created_at, m.updated_at,
+                        m.accessed_at, m.access_count,
+                        0.0 as distance, 'scoped' as source_type, NULL as chunk_index
                     FROM session_memories m
                     {where_clause}
                     {order_clause}
@@ -640,6 +696,8 @@ class SessionMemoryStore:
             # Format results
             results = []
             for row in rows:
+                # Defensive distance handling: if distance is None, treat as 0.0
+                distance_val = row[16] if len(row) > 16 else 0.0
                 memory = {
                     "id": row[0],
                     "memory_type": row[1],
@@ -657,7 +715,8 @@ class SessionMemoryStore:
                     "updated_at": row[13],
                     "accessed_at": row[14],
                     "access_count": row[15],
-                    "similarity": max(0.0, 2.0 - row[16]) if len(row) > 16 else 1.0  # Convert distance to similarity (sqlite-vec L2 distance)
+                    # Convert distance to similarity (sqlite-vec L2 distance)
+                    "similarity": max(0.0, 2.0 - float(distance_val)) if distance_val is not None else 0.0
                 }
 
                 # Add source information if available (from semantic search)
@@ -1561,6 +1620,198 @@ class SessionMemoryStore:
                 "success": False,
                 "error": "Reconstruction failed",
                 "message": str(e)
+            }
+
+    def write_document_to_file(
+        self,
+        memory_id: int,
+        output_path: str = None,
+        include_metadata: bool = True,
+        format: str = "markdown"
+    ) -> Dict[str, Any]:
+        """
+        Write a reconstructed document from memory to disk as a markdown file.
+        
+        Use this when documents are too large for MCP response (>20k tokens).
+        After writing, use standard file read operations to access the content.
+        
+        Args:
+            memory_id: The ID of the memory to reconstruct and write
+            output_path: Absolute path where to write the file (auto-generated if None)
+            include_metadata: Whether to include YAML frontmatter with metadata
+            format: Output format ("markdown" or "plain")
+        
+        Returns:
+            Dict with success status and file information
+        """
+        try:
+            # ===== STEP 1: VALIDATE INPUTS =====
+            if memory_id <= 0:
+                return {
+                    "success": False,
+                    "error_code": "INVALID_PARAMETER",
+                    "error_message": "memory_id must be a positive integer",
+                    "memory_id": memory_id
+                }
+            
+            if format not in ["markdown", "plain"]:
+                return {
+                    "success": False,
+                    "error_code": "INVALID_PARAMETER",
+                    "error_message": "format must be 'markdown' or 'plain'",
+                    "format": format
+                }
+            
+            if output_path and not Path(output_path).is_absolute():
+                return {
+                    "success": False,
+                    "error_code": "INVALID_PATH",
+                    "error_message": "output_path must be an absolute path",
+                    "output_path": output_path
+                }
+            
+            # ===== STEP 2: FETCH MEMORY FROM DATABASE =====
+            memory_result = self.get_memory(memory_id)
+            
+            if not memory_result.get("success"):
+                return {
+                    "success": False,
+                    "error_code": "MEMORY_NOT_FOUND",
+                    "error_message": f"Memory with ID {memory_id} does not exist",
+                    "memory_id": memory_id
+                }
+            
+            memory = memory_result["memory"]
+            
+            # ===== STEP 3: RECONSTRUCT FULL DOCUMENT =====
+            reconstruct_result = self.reconstruct_document(memory_id)
+            
+            if not reconstruct_result.get("success"):
+                return {
+                    "success": False,
+                    "error_code": "RECONSTRUCTION_FAILED",
+                    "error_message": f"Failed to reconstruct document: {reconstruct_result.get('message', 'Unknown error')}",
+                    "memory_id": memory_id
+                }
+            
+            full_content = reconstruct_result["content"]
+            
+            # ===== STEP 4: ADD METADATA IF REQUESTED =====
+            if include_metadata and YAML_AVAILABLE:
+                # Generate YAML frontmatter
+                frontmatter_data = {
+                    "memory_id": memory["id"],
+                    "title": memory.get("title") or "Untitled Document",
+                    "memory_type": memory.get("memory_type"),
+                    "created_at": memory.get("created_at"),
+                    "updated_at": memory.get("updated_at"),
+                    "session_id": memory.get("session_id"),
+                    "agent_id": memory.get("agent_id"),
+                    "task_code": memory.get("task_code"),
+                    "tags": memory.get("tags", [])
+                }
+                
+                # Remove None values
+                frontmatter_data = {k: v for k, v in frontmatter_data.items() if v is not None}
+                
+                if memory.get("description"):
+                    frontmatter_data["description"] = memory["description"]
+                
+                try:
+                    frontmatter_yaml = yaml.dump(frontmatter_data, default_flow_style=False, sort_keys=False)
+                    frontmatter = f"---\n{frontmatter_yaml}---\n\n"
+                    full_content = frontmatter + full_content
+                except Exception:
+                    # If YAML generation fails, continue without frontmatter
+                    pass
+            
+            # ===== STEP 5: DETERMINE OUTPUT PATH =====
+            if output_path is None:
+                # Generate automatic temp path
+                timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+                filename = f"memory_{memory_id}_{timestamp}.md"
+                
+                temp_dir = Path(tempfile.gettempdir()) / "vector_memory"
+                temp_dir.mkdir(parents=True, exist_ok=True)
+                
+                output_path = temp_dir / filename
+            else:
+                output_path = Path(output_path)
+                
+                # Validate provided path and create directory if needed
+                try:
+                    output_path.parent.mkdir(parents=True, exist_ok=True)
+                except PermissionError:
+                    return {
+                        "success": False,
+                        "error_code": "PERMISSION_DENIED",
+                        "error_message": f"Cannot create directory: {output_path.parent}",
+                        "output_path": str(output_path)
+                    }
+                except OSError as e:
+                    return {
+                        "success": False,
+                        "error_code": "PERMISSION_DENIED",
+                        "error_message": f"Cannot create directory: {str(e)}",
+                        "output_path": str(output_path)
+                    }
+            
+            # ===== STEP 6: WRITE TO FILE =====
+            try:
+                output_path.write_text(full_content, encoding="utf-8")
+            except PermissionError:
+                return {
+                    "success": False,
+                    "error_code": "PERMISSION_DENIED",
+                    "error_message": f"No write permission for path: {output_path}",
+                    "output_path": str(output_path)
+                }
+            except OSError as e:
+                if "No space left" in str(e) or "Disk quota exceeded" in str(e):
+                    return {
+                        "success": False,
+                        "error_code": "DISK_FULL",
+                        "error_message": "Insufficient disk space",
+                        "output_path": str(output_path)
+                    }
+                else:
+                    return {
+                        "success": False,
+                        "error_code": "WRITE_FAILED",
+                        "error_message": f"Failed to write file: {str(e)}",
+                        "output_path": str(output_path)
+                    }
+            except Exception as e:
+                return {
+                    "success": False,
+                    "error_code": "WRITE_FAILED",
+                    "error_message": f"Unexpected error writing file: {str(e)}",
+                    "output_path": str(output_path)
+                }
+            
+            # ===== STEP 7: GATHER STATISTICS =====
+            file_size_bytes = output_path.stat().st_size
+            file_size_human = self._format_bytes_human_readable(file_size_bytes)
+            estimated_tokens = self._estimate_tokens(full_content)
+            
+            # ===== STEP 8: RETURN SUCCESS =====
+            return {
+                "success": True,
+                "file_path": str(output_path.absolute()),
+                "file_size_bytes": file_size_bytes,
+                "file_size_human": file_size_human,
+                "estimated_tokens": estimated_tokens,
+                "memory_id": memory_id,
+                "created_at": datetime.now(timezone.utc).isoformat() + "Z",
+                "message": "Document successfully written to disk"
+            }
+        
+        except Exception as e:
+            return {
+                "success": False,
+                "error_code": "WRITE_FAILED",
+                "error_message": f"Unexpected error: {str(e)}",
+                "memory_id": memory_id
             }
 
     def delete_memory(self, memory_id: int) -> Dict[str, Any]:
