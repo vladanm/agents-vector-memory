@@ -152,18 +152,32 @@ class SessionMemoryStore:
         # Load sqlite-vec extension
         try:
             conn.enable_load_extension(True)
-            # Try common paths for vec0 extension
-            vec_paths = [
+
+            # Build list of paths to try
+            vec_paths = []
+
+            # First, try to find sqlite_vec in Python's site-packages
+            try:
+                import sqlite_vec
+                import os
+                sqlite_vec_dir = os.path.dirname(sqlite_vec.__file__)
+                vec_paths.append(os.path.join(sqlite_vec_dir, "vec0"))
+            except ImportError:
+                pass
+
+            # Add common installation paths
+            vec_paths.extend([
                 "./vec0",
                 "/usr/local/lib/vec0",
                 "/opt/homebrew/lib/vec0",
-            ]
+            ])
 
             loaded = False
             for vec_path in vec_paths:
                 try:
                     conn.load_extension(vec_path)
                     loaded = True
+                    logger.info(f"Loaded vec0 extension from: {vec_path}")
                     break
                 except sqlite3.OperationalError:
                     continue
@@ -173,6 +187,7 @@ class SessionMemoryStore:
                 try:
                     conn.load_extension("vec0")
                     loaded = True
+                    logger.info("Loaded vec0 extension from system")
                 except sqlite3.OperationalError:
                     pass
 
@@ -180,11 +195,11 @@ class SessionMemoryStore:
 
             if not loaded:
                 # Vector search will be unavailable but basic operations work
-                pass
+                logger.warning("Failed to load vec0 extension - vector search unavailable")
 
-        except Exception:
+        except Exception as e:
             # Extension loading failed - continue without vector search
-            pass
+            logger.warning(f"Exception loading vec0 extension: {e}")
 
         return conn
 
