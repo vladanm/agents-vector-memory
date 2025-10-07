@@ -1,16 +1,6 @@
-#!/usr/bin/env -S uv run --script
+#\!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-# /// script
-# dependencies = [
-#     "mcp>=0.3.0",
-#     "sqlite-vec>=0.1.6",
-#     "sentence-transformers>=2.2.2",
-#     "tiktoken>=0.5.0",
-#     "pyyaml>=6.0",
-#     "langchain-text-splitters>=0.3.0"
-# ]
-# requires-python = ">=3.8"
-# ///
+
 
 """
 Agent Session Memory MCP Server
