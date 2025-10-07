@@ -42,9 +42,6 @@ class MaintenanceOperations:
         """Cleanup old memories (placeholder for future implementation)."""
         return {
             "success": False,
-            "deleted_count": None,
-            "oldest_deleted": None,
-            "newest_deleted": None,
             "error": "Not implemented",
             "message": "Cleanup functionality not yet implemented"
         }

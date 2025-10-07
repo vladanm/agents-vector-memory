@@ -316,13 +316,6 @@ class SessionMemoryStore:
             if memory_type not in VALID_MEMORY_TYPES:
                 return {
                     "success": False,
-                    "memory_id": None,
-                    "memory_type": None,
-                    "agent_id": None,
-                    "session_id": None,
-                    "content_hash": None,
-                    "chunks_created": None,
-                    "created_at": None,
                     "error": "Invalid memory type",
                     "message": f"Memory type must be one of: {VALID_MEMORY_TYPES}"
                 }
@@ -331,13 +324,6 @@ class SessionMemoryStore:
             if not agent_id or agent_id.strip() == "":
                 return {
                     "success": False,
-                    "memory_id": None,
-                    "memory_type": None,
-                    "agent_id": None,
-                    "session_id": None,
-                    "content_hash": None,
-                    "chunks_created": None,
-                    "created_at": None,
                     "error": "Invalid agent_id",
                     "message": "agent_id cannot be empty"
                 }
@@ -346,13 +332,6 @@ class SessionMemoryStore:
             if not session_id or session_id.strip() == "":
                 return {
                     "success": False,
-                    "memory_id": None,
-                    "memory_type": None,
-                    "agent_id": None,
-                    "session_id": None,
-                    "content_hash": None,
-                    "chunks_created": None,
-                    "created_at": None,
                     "error": "Invalid session_id",
                     "message": "session_id cannot be empty"
                 }
@@ -478,13 +457,6 @@ class SessionMemoryStore:
         except Exception as e:
             return {
                 "success": False,
-                "memory_id": None,
-                "memory_type": None,
-                "agent_id": None,
-                "session_id": None,
-                "content_hash": None,
-                "chunks_created": None,
-                "created_at": None,
                 "error": "Storage failed",
                 "message": str(e)
             }
@@ -610,18 +582,6 @@ class SessionMemoryStore:
         except Exception as e:
             return {
                 "success": False,
-                "results": [],
-                "total_results": 0,
-                "query": query,
-                "filters": {
-                    "memory_type": memory_type,
-                    "agent_id": agent_id,
-                    "session_id": session_id,
-                    "session_iter": session_iter,
-                    "task_code": task_code
-                },
-                "limit": limit,
-                "latest_first": latest_first,
                 "error": "Search failed",
                 "message": str(e)
             }
@@ -729,12 +689,6 @@ class SessionMemoryStore:
                 conn.close()
                 return {
                     "success": False,
-                    "memory_id": None,
-                    "target_chunk_index": None,
-                    "context_window": None,
-                    "chunks_returned": None,
-                    "expanded_content": None,
-                    "chunks": None,
                     "error": "Chunk not found",
                     "message": f"No chunk found at index {chunk_index} for memory {memory_id}"
                 }
@@ -773,20 +727,12 @@ class SessionMemoryStore:
                 "context_window": context_window,
                 "chunks_returned": len(all_chunks),
                 "expanded_content": expanded_content,
-                "chunks": all_chunks,
-                "error": None,
-                "message": None
+                "chunks": all_chunks
             }
 
         except Exception as e:
             return {
                 "success": False,
-                "memory_id": None,
-                "target_chunk_index": None,
-                "context_window": None,
-                "chunks_returned": None,
-                "expanded_content": None,
-                "chunks": None,
                 "error": "Context expansion failed",
                 "message": str(e)
             }
@@ -845,23 +791,19 @@ class SessionMemoryStore:
                     "success": True,
                     "found_previous_context": True,
                     "context": context,
-                    "message": f"Found previous context for task: {current_task_code}",
-                    "error": None
+                    "message": f"Found previous context for task: {current_task_code}"
                 }
             else:
                 return {
                     "success": True,
                     "found_previous_context": False,
                     "context": None,
-                    "message": f"No previous context found for task: {current_task_code}",
-                    "error": None
+                    "message": f"No previous context found for task: {current_task_code}"
                 }
 
         except Exception as e:
             return {
                 "success": False,
-                "found_previous_context": False,
-                "context": None,
                 "error": "Context loading failed",
                 "message": str(e)
             }
@@ -880,7 +822,6 @@ class SessionMemoryStore:
             if not row:
                 return {
                     "success": False,
-                    "memory": None,
                     "error": "Memory not found",
                     "message": f"No memory found with ID: {memory_id}"
                 }
@@ -906,15 +847,12 @@ class SessionMemoryStore:
 
             return {
                 "success": True,
-                "memory": memory,
-                "error": None,
-                "message": None
+                "memory": memory
             }
 
         except Exception as e:
             return {
                 "success": False,
-                "memory": None,
                 "error": "Retrieval failed",
                 "message": str(e)
             }
@@ -994,16 +932,6 @@ class SessionMemoryStore:
         except Exception as e:
             return {
                 "success": False,
-                "total_memories": None,
-                "memory_types": None,
-                "unique_agents": None,
-                "unique_sessions": None,
-                "unique_tasks": None,
-                "max_session_iter": None,
-                "avg_content_length": None,
-                "total_access_count": None,
-                "memory_type_breakdown": None,
-                "filters": None,
                 "error": "Stats retrieval failed",
                 "message": str(e)
             }
@@ -1056,18 +984,12 @@ class SessionMemoryStore:
                 "sessions": sessions,
                 "total_sessions": len(sessions),
                 "agent_filter": agent_id,
-                "limit": limit,
-                "error": None,
-                "message": None
+                "limit": limit
             }
 
         except Exception as e:
             return {
                 "success": False,
-                "sessions": [],
-                "total_sessions": 0,
-                "agent_filter": agent_id,
-                "limit": limit,
                 "error": "Session listing failed",
                 "message": str(e)
             }
@@ -1096,11 +1018,6 @@ class SessionMemoryStore:
                 conn.close()
                 return {
                     "success": False,
-                    "memory_id": None,
-                    "content": None,
-                    "title": None,
-                    "memory_type": None,
-                    "chunk_count": 0,
                     "error": "Memory not found",
                     "message": f"No memory found with ID: {memory_id}"
                 }
@@ -1126,8 +1043,7 @@ class SessionMemoryStore:
                     "title": parent[1],
                     "memory_type": parent[2],
                     "chunk_count": 0,
-                    "message": "No chunks found, returning original content",
-                    "error": None
+                    "message": "No chunks found, returning original content"
                 }
 
             # Reconstruct from chunks using original_content (index 5) if available,
@@ -1147,18 +1063,12 @@ class SessionMemoryStore:
                 "title": parent[1],
                 "memory_type": parent[2],
                 "chunk_count": len(chunks),
-                "message": f"Document reconstructed from {len(chunks)} chunks",
-                "error": None
+                "message": f"Document reconstructed from {len(chunks)} chunks"
             }
 
         except Exception as e:
             return {
                 "success": False,
-                "memory_id": None,
-                "content": None,
-                "title": None,
-                "memory_type": None,
-                "chunk_count": 0,
                 "error": "Reconstruction failed",
                 "message": str(e)
             }
@@ -1190,43 +1100,25 @@ class SessionMemoryStore:
             if memory_id <= 0:
                 return {
                     "success": False,
-                    "file_path": None,
-                    "file_size_bytes": None,
-                    "file_size_human": None,
-                    "estimated_tokens": None,
-                    "memory_id": memory_id,
-                    "created_at": None,
-                    "message": None,
                     "error_code": "INVALID_PARAMETER",
-                    "error_message": "memory_id must be a positive integer"
+                    "error_message": "memory_id must be a positive integer",
+                    "memory_id": memory_id
                 }
 
             if format not in ["markdown", "plain"]:
                 return {
                     "success": False,
-                    "file_path": None,
-                    "file_size_bytes": None,
-                    "file_size_human": None,
-                    "estimated_tokens": None,
-                    "memory_id": None,
-                    "created_at": None,
-                    "message": None,
                     "error_code": "INVALID_PARAMETER",
-                    "error_message": "format must be 'markdown' or 'plain'"
+                    "error_message": "format must be 'markdown' or 'plain'",
+                    "format": format
                 }
 
             if output_path and not Path(output_path).is_absolute():
                 return {
                     "success": False,
-                    "file_path": None,
-                    "file_size_bytes": None,
-                    "file_size_human": None,
-                    "estimated_tokens": None,
-                    "memory_id": None,
-                    "created_at": None,
-                    "message": None,
                     "error_code": "INVALID_PATH",
-                    "error_message": "output_path must be an absolute path"
+                    "error_message": "output_path must be an absolute path",
+                    "output_path": output_path
                 }
 
             # ===== STEP 2: FETCH MEMORY FROM DATABASE =====
@@ -1235,15 +1127,9 @@ class SessionMemoryStore:
             if not memory_result.get("success"):
                 return {
                     "success": False,
-                    "file_path": None,
-                    "file_size_bytes": None,
-                    "file_size_human": None,
-                    "estimated_tokens": None,
-                    "memory_id": memory_id,
-                    "created_at": None,
-                    "message": None,
                     "error_code": "MEMORY_NOT_FOUND",
-                    "error_message": f"Memory with ID {memory_id} does not exist"
+                    "error_message": f"Memory with ID {memory_id} does not exist",
+                    "memory_id": memory_id
                 }
 
             memory = memory_result["memory"]
@@ -1254,15 +1140,9 @@ class SessionMemoryStore:
             if not reconstruct_result.get("success"):
                 return {
                     "success": False,
-                    "file_path": None,
-                    "file_size_bytes": None,
-                    "file_size_human": None,
-                    "estimated_tokens": None,
-                    "memory_id": memory_id,
-                    "created_at": None,
-                    "message": None,
                     "error_code": "RECONSTRUCTION_FAILED",
-                    "error_message": f"Failed to reconstruct document: {reconstruct_result.get('message', 'Unknown error')}"
+                    "error_message": f"Failed to reconstruct document: {reconstruct_result.get('message', 'Unknown error')}",
+                    "memory_id": memory_id
                 }
 
             full_content = reconstruct_result["content"]
@@ -1315,28 +1195,16 @@ class SessionMemoryStore:
                 except PermissionError:
                     return {
                         "success": False,
-                        "file_path": None,
-                        "file_size_bytes": None,
-                        "file_size_human": None,
-                        "estimated_tokens": None,
-                        "memory_id": None,
-                        "created_at": None,
-                        "message": None,
                         "error_code": "PERMISSION_DENIED",
-                        "error_message": f"Cannot create directory: {output_path.parent}"
+                        "error_message": f"Cannot create directory: {output_path.parent}",
+                        "output_path": str(output_path)
                     }
                 except OSError as e:
                     return {
                         "success": False,
-                        "file_path": None,
-                        "file_size_bytes": None,
-                        "file_size_human": None,
-                        "estimated_tokens": None,
-                        "memory_id": None,
-                        "created_at": None,
-                        "message": None,
                         "error_code": "PERMISSION_DENIED",
-                        "error_message": f"Cannot create directory: {str(e)}"
+                        "error_message": f"Cannot create directory: {str(e)}",
+                        "output_path": str(output_path)
                     }
 
             # ===== STEP 6: WRITE TO FILE =====
@@ -1345,55 +1213,31 @@ class SessionMemoryStore:
             except PermissionError:
                 return {
                     "success": False,
-                    "file_path": None,
-                    "file_size_bytes": None,
-                    "file_size_human": None,
-                    "estimated_tokens": None,
-                    "memory_id": None,
-                    "created_at": None,
-                    "message": None,
                     "error_code": "PERMISSION_DENIED",
-                    "error_message": f"No write permission for path: {output_path}"
+                    "error_message": f"No write permission for path: {output_path}",
+                    "output_path": str(output_path)
                 }
             except OSError as e:
                 if "No space left" in str(e) or "Disk quota exceeded" in str(e):
                     return {
                         "success": False,
-                        "file_path": None,
-                        "file_size_bytes": None,
-                        "file_size_human": None,
-                        "estimated_tokens": None,
-                        "memory_id": None,
-                        "created_at": None,
-                        "message": None,
                         "error_code": "DISK_FULL",
-                        "error_message": "Insufficient disk space"
+                        "error_message": "Insufficient disk space",
+                        "output_path": str(output_path)
                     }
                 else:
                     return {
                         "success": False,
-                        "file_path": None,
-                        "file_size_bytes": None,
-                        "file_size_human": None,
-                        "estimated_tokens": None,
-                        "memory_id": None,
-                        "created_at": None,
-                        "message": None,
                         "error_code": "WRITE_FAILED",
-                        "error_message": f"Failed to write file: {str(e)}"
+                        "error_message": f"Failed to write file: {str(e)}",
+                        "output_path": str(output_path)
                     }
             except Exception as e:
                 return {
                     "success": False,
-                    "file_path": None,
-                    "file_size_bytes": None,
-                    "file_size_human": None,
-                    "estimated_tokens": None,
-                    "memory_id": None,
-                    "created_at": None,
-                    "message": None,
                     "error_code": "WRITE_FAILED",
-                    "error_message": f"Unexpected error writing file: {str(e)}"
+                    "error_message": f"Unexpected error writing file: {str(e)}",
+                    "output_path": str(output_path)
                 }
 
             # ===== STEP 7: GATHER STATISTICS =====
@@ -1410,23 +1254,15 @@ class SessionMemoryStore:
                 "estimated_tokens": estimated_tokens,
                 "memory_id": memory_id,
                 "created_at": datetime.now(timezone.utc).isoformat() + "Z",
-                "message": "Document successfully written to disk",
-                "error_code": None,
-                "error_message": None
+                "message": "Document successfully written to disk"
             }
 
         except Exception as e:
             return {
                 "success": False,
-                "file_path": None,
-                "file_size_bytes": None,
-                "file_size_human": None,
-                "estimated_tokens": None,
-                "memory_id": memory_id,
-                "created_at": None,
-                "message": None,
                 "error_code": "WRITE_FAILED",
-                "error_message": f"Unexpected error: {str(e)}"
+                "error_message": f"Unexpected error: {str(e)}",
+                "memory_id": memory_id
             }
 
     def _delete_memory_impl(self, memory_id: int) -> dict[str, Any]:
@@ -1452,7 +1288,6 @@ class SessionMemoryStore:
                 if not existing:
                     return {
                         "success": False,
-                        "memory_id": None,
                         "error": "Memory not found",
                         "message": f"No memory found with ID: {memory_id}"
                     }
@@ -1468,15 +1303,13 @@ class SessionMemoryStore:
                 return {
                     "success": True,
                     "memory_id": memory_id,
-                    "message": f"Memory {memory_id} and all associated data deleted successfully",
-                    "error": None
+                    "message": f"Memory {memory_id} and all associated data deleted successfully"
                 }
 
             except Exception as delete_error:
                 conn.rollback()
                 return {
                     "success": False,
-                    "memory_id": None,
                     "error": "Deletion failed",
                     "message": str(delete_error)
                 }
@@ -1488,7 +1321,6 @@ class SessionMemoryStore:
         except Exception as e:
             return {
                 "success": False,
-                "memory_id": None,
                 "error": "Deletion failed",
                 "message": str(e)
             }

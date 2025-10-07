@@ -1,7 +1,18 @@
 #\!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-
-
+# /// script
+# requires-python = ">=3.11"
+# dependencies = [
+#   "fastmcp>=2.12.0",
+#   "mcp>=1.16.0",
+#   "sqlite-vec~=0.1.6",
+#   "sentence-transformers>=2.2.2",
+#   "tiktoken~=0.5.1",
+#   "pyyaml~=6.0",
+#   "langchain-text-splitters~=0.3.0",
+#   "numpy>=1.24.0",
+#   "typing-extensions>=4.0.0",
+# ]
+# ///
 """
 Agent Session Memory MCP Server
 ===============================

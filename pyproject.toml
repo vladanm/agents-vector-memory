@@ -22,7 +22,8 @@ classifiers = [
 ]
 
 dependencies = [
-    "mcp~=1.0.0",
+    "fastmcp>=2.12.0",
+    "mcp>=1.16.0",
     "sqlite-vec~=0.1.6",
     "sentence-transformers>=2.2.2",
     "tiktoken~=0.5.1",
