@@ -239,7 +239,7 @@ def test_memory_types_validation():
             content="Test content"
         )
         assert invalid_result["success"] == False
-        assert "Invalid memory type" in invalid_result["message"]
+        assert "Invalid memory type" in invalid_result["error"]
         print("✅ Invalid memory type correctly rejected")
 
 
