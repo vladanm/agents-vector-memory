@@ -35,6 +35,13 @@ except ImportError:
 from .chunking import DocumentChunker, ChunkingConfig
 from .memory_types import ContentFormat, ChunkEntry, get_memory_type_config
 
+# Import modular operations
+from .storage import StorageOperations
+from .search import SearchOperations
+from .maintenance import MaintenanceOperations
+from .chunking_storage import ChunkingStorageOperations
+
+
 # Valid memory types
 VALID_MEMORY_TYPES = [
     "session_context", "input_prompt", "system_memory", "reports",
@@ -73,6 +80,13 @@ class SessionMemoryStore:
         # Initialize embedding model (lazily, only when needed)
         self._embedding_model = None
 
+
+        # Initialize operation modules
+        self.storage = StorageOperations(self)
+        self.search = SearchOperations(self)
+        self.maintenance = MaintenanceOperations(self)
+        self.chunking = ChunkingStorageOperations(self)
+
     @property
     def chunker(self) -> 'DocumentChunker':
         """Lazy initialization of chunker"""
@@ -109,378 +123,60 @@ class SessionMemoryStore:
                 self._embedding_model = False
         return self._embedding_model if self._embedding_model is not False else None
 
-    def _estimate_tokens(self, text: str) -> int:
-        """
-        Estimate token count for text using cached tokenizer.
-        Falls back to character-based estimation if tokenizer unavailable.
-        """
-        if self.token_encoder:
-            try:
-                return len(self.token_encoder.encode(text))
-            except Exception:
-                pass
 
-        # Fallback: ~4 characters per token
-        return len(text) // 4
+    # ======================
+    # PUBLIC API (Delegates to modules)
+    # ======================
 
-    def _format_bytes_human_readable(self, size_bytes: int) -> str:
-        """Format file size in human-readable format"""
-        for unit in ['B', 'KB', 'MB', 'GB']:
-            if size_bytes < 1024.0:
-                return f"{size_bytes:.1f} {unit}"
-            size_bytes /= 1024.0
-        return f"{size_bytes:.1f} TB"
+    def store_memory(self, *args, **kwargs) -> dict[str, Any]:
+        """Store a memory entry."""
+        return self.storage.store_memory(*args, **kwargs)
 
-    def _get_connection(self) -> sqlite3.Connection:
-        """
-        Get database connection with extensions loaded.
+    def search_memories(self, *args, **kwargs) -> dict[str, Any]:
+        """Search memories with filters."""
+        return self.search.search_memories(*args, **kwargs)
 
-        Configures busy_timeout to handle concurrent access from multiple processes.
-        This is critical for MCP server usage where the server holds connections
-        while clients make queries.
+    def search_with_granularity(self, *args, **kwargs) -> dict[str, Any]:
+        """Search with specific granularity."""
+        return self.search.search_with_granularity(*args, **kwargs)
 
-        Returns:
-            sqlite3.Connection with busy_timeout=5000ms and extensions loaded
-        """
-        conn = sqlite3.connect(self.db_path)
+    def expand_chunk_context(self, *args, **kwargs) -> dict[str, Any]:
+        """Expand chunk context."""
+        return self.chunking.expand_chunk_context(*args, **kwargs)
 
-        # STEP 1: Enable WAL mode for better concurrency
-        # WAL allows readers to read while writer writes (no blocking)
-        conn.execute("PRAGMA journal_mode=WAL")
+    def load_session_context_for_task(self, *args, **kwargs) -> dict[str, Any]:
+        """Load session context for task."""
+        return self.search.load_session_context_for_task(*args, **kwargs)
 
-        # STEP 2: Set synchronous to NORMAL (balance of safety and speed)
-        conn.execute("PRAGMA synchronous=NORMAL")
+    def get_memory(self, *args, **kwargs) -> dict[str, Any]:
+        """Get memory by ID."""
+        return self.storage.get_memory(*args, **kwargs)
 
-        # STEP 3: Increase cache size to 64MB for performance
-        conn.execute("PRAGMA cache_size=-64000")
+    def get_session_stats(self, *args, **kwargs) -> dict[str, Any]:
+        """Get session statistics."""
+        return self.maintenance.get_session_stats(*args, **kwargs)
 
-        # STEP 4: Enable foreign keys for referential integrity
-        conn.execute("PRAGMA foreign_keys=ON")
+    def list_sessions(self, *args, **kwargs) -> dict[str, Any]:
+        """List sessions."""
+        return self.maintenance.list_sessions(*args, **kwargs)
 
-        # STEP 5: Set busy timeout to handle concurrent access
-        conn.execute("PRAGMA busy_timeout=5000")
+    def reconstruct_document(self, *args, **kwargs) -> dict[str, Any]:
+        """Reconstruct document from chunks."""
+        return self.storage.reconstruct_document(*args, **kwargs)
 
-        # Load sqlite-vec extension
-        try:
-            conn.enable_load_extension(True)
+    def write_document_to_file(self, *args, **kwargs) -> dict[str, Any]:
+        """Write document to file."""
+        return self.storage.write_document_to_file(*args, **kwargs)
 
-            # Build list of paths to try
-            vec_paths = []
+    def delete_memory(self, *args, **kwargs) -> dict[str, Any]:
+        """Delete memory."""
+        return self.storage.delete_memory(*args, **kwargs)
 
-            # First, try to find sqlite_vec in Python's site-packages
-            try:
-                import sqlite_vec
-                import os
-                sqlite_vec_dir = os.path.dirname(sqlite_vec.__file__)
-                vec_paths.append(os.path.join(sqlite_vec_dir, "vec0"))
-            except ImportError:
-                pass
+    # ======================
+    # IMPLEMENTATION METHODS
+    # ======================
 
-            # Add common installation paths
-            vec_paths.extend([
-                "./vec0",
-                "/usr/local/lib/vec0",
-                "/opt/homebrew/lib/vec0",
-            ])
-
-            loaded = False
-            for vec_path in vec_paths:
-                try:
-                    conn.load_extension(vec_path)
-                    loaded = True
-                    logger.info(f"Loaded vec0 extension from: {vec_path}")
-                    break
-                except sqlite3.OperationalError:
-                    continue
-
-            if not loaded:
-                # Try loading without path (system-installed)
-                try:
-                    conn.load_extension("vec0")
-                    loaded = True
-                    logger.info("Loaded vec0 extension from system")
-                except sqlite3.OperationalError:
-                    pass
-
-            conn.enable_load_extension(False)
-
-            if not loaded:
-                # Vector search will be unavailable but basic operations work
-                logger.warning("Failed to load vec0 extension - vector search unavailable")
-
-        except Exception as e:
-            # Extension loading failed - continue without vector search
-            logger.warning(f"Exception loading vec0 extension: {e}")
-
-        return conn
-
-    def __enter__(self) -> 'SessionMemoryStore':
-        """Context manager entry - no-op, connections managed per operation"""
-        return self
-
-    def __exit__(self, exc_type, exc_val, exc_tb) -> bool:
-        """Context manager exit - no-op, connections managed per operation"""
-        return False
-
-
-    def _migrate_schema(self, conn: sqlite3.Connection) -> int:
-        """
-        Migrate database schema to latest version by adding missing columns.
-
-        This method is idempotent - safe to run multiple times. It detects
-        which columns are missing and only adds those, preserving all existing data.
-
-        Args:
-            conn: Active database connection
-
-        Returns:
-            Number of migrations applied (0 if schema already up-to-date)
-
-        Raises:
-            sqlite3.Error: If migration fails
-        """
-        try:
-            # Check if memory_chunks table exists
-            cursor = conn.execute(
-                "SELECT name FROM sqlite_master WHERE type='table' AND name='memory_chunks'"
-            )
-            if not cursor.fetchone():
-                # Table doesn't exist yet, will be created by CREATE TABLE statement
-                return 0
-
-            # Get existing columns
-            cursor = conn.execute("PRAGMA table_info(memory_chunks)")
-            existing_columns = {row[1] for row in cursor.fetchall()}
-
-            # Define required columns with their ALTER TABLE statements
-            # Format: column_name: (alter_statement, column_type, default_value)
-            required_columns = {
-                'granularity_level': (
-                    "ALTER TABLE memory_chunks ADD COLUMN granularity_level TEXT DEFAULT 'medium'",
-                    "TEXT",
-                    "'medium'"
-                ),
-                'parent_title': (
-                    "ALTER TABLE memory_chunks ADD COLUMN parent_title TEXT DEFAULT NULL",
-                    "TEXT",
-                    "NULL"
-                ),
-                'section_hierarchy': (
-                    "ALTER TABLE memory_chunks ADD COLUMN section_hierarchy TEXT DEFAULT NULL",
-                    "TEXT",
-                    "NULL"
-                ),
-                'chunk_position_ratio': (
-                    "ALTER TABLE memory_chunks ADD COLUMN chunk_position_ratio REAL DEFAULT 0.5",
-                    "REAL",
-                    "0.5"
-                ),
-                'sibling_count': (
-                    "ALTER TABLE memory_chunks ADD COLUMN sibling_count INTEGER DEFAULT 1",
-                    "INTEGER",
-                    "1"
-                ),
-                'depth_level': (
-                    "ALTER TABLE memory_chunks ADD COLUMN depth_level INTEGER DEFAULT 0",
-                    "INTEGER",
-                    "0"
-                ),
-                'contains_code': (
-                    "ALTER TABLE memory_chunks ADD COLUMN contains_code BOOLEAN DEFAULT 0",
-                    "BOOLEAN",
-                    "0"
-                ),
-                'contains_table': (
-                    "ALTER TABLE memory_chunks ADD COLUMN contains_table BOOLEAN DEFAULT 0",
-                    "BOOLEAN",
-                    "0"
-                ),
-                'keywords': (
-                    "ALTER TABLE memory_chunks ADD COLUMN keywords TEXT DEFAULT '[]'",
-                    "TEXT",
-                    "'[]'"
-                ),
-                'original_content': (
-                    "ALTER TABLE memory_chunks ADD COLUMN original_content TEXT DEFAULT NULL",
-                    "TEXT",
-                    "NULL"
-                ),
-                'is_contextually_enriched': (
-                    "ALTER TABLE memory_chunks ADD COLUMN is_contextually_enriched BOOLEAN DEFAULT 0",
-                    "BOOLEAN",
-                    "0"
-                )
-            }
-
-            # Determine which columns need to be added
-            migrations_to_apply = []
-            for column_name, (alter_statement, col_type, default_val) in required_columns.items():
-                if column_name not in existing_columns:
-                    migrations_to_apply.append({
-                        'column': column_name,
-                        'statement': alter_statement,
-                        'type': col_type,
-                        'default': default_val
-                    })
-
-            # If no migrations needed, return early
-            if not migrations_to_apply:
-                logger.info("Database schema is up-to-date (no migrations needed)")
-                return 0
-
-            # Apply migrations
-            logger.info(f"Applying {len(migrations_to_apply)} schema migration(s)...")
-
-            for migration in migrations_to_apply:
-                try:
-                    conn.execute(migration['statement'])
-                    logger.info(f"Added column: {migration['column']} ({migration['type']}, default={migration['default']})") 
-                except sqlite3.Error as e:
-                    # If column already exists (race condition), continue
-                    if "duplicate column" in str(e).lower():
-                        logger.warning(f"Column {migration['column']} already exists, skipping")
-                        continue
-                    else:
-                        # Re-raise other errors
-                        raise
-
-            # Commit all migrations as a transaction
-            conn.commit()
-
-            # Verify migrations were applied
-            cursor = conn.execute("PRAGMA table_info(memory_chunks)")
-            updated_columns = {row[1] for row in cursor.fetchall()}
-
-            # Check if all required columns now exist
-            missing_after_migration = set(required_columns.keys()) - updated_columns
-            if missing_after_migration:
-                raise sqlite3.Error(
-                    f"Migration incomplete: columns still missing after migration: {missing_after_migration}"
-                )
-
-            logger.info(f"Successfully applied {len(migrations_to_apply)} schema migration(s)")
-            logger.info(f"Database schema updated from {len(existing_columns)} to {len(updated_columns)} columns")
-
-            return len(migrations_to_apply)
-
-        except sqlite3.Error as e:
-            logger.error(f"Schema migration failed: {e}")
-            conn.rollback()
-            raise
-
-    def _init_schema(self) -> None:
-        """Initialize database schema"""
-        conn = self._get_connection()
-
-        # Main session memories table
-        conn.execute("""
-            CREATE TABLE IF NOT EXISTS session_memories (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                memory_type TEXT NOT NULL,
-                agent_id TEXT NOT NULL,
-                session_id TEXT NOT NULL,
-                session_iter INTEGER DEFAULT 1,
-                task_code TEXT,
-                content TEXT NOT NULL,
-                title TEXT,
-                description TEXT,
-                tags TEXT,
-                metadata TEXT,
-                content_hash TEXT NOT NULL,
-                created_at TEXT NOT NULL,
-                updated_at TEXT NOT NULL,
-                accessed_at TEXT NOT NULL,
-                access_count INTEGER DEFAULT 0
-            )
-        """)
-
-        # Memory chunks table (for hierarchical chunking)
-        conn.execute("""
-            CREATE TABLE IF NOT EXISTS memory_chunks (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                parent_id INTEGER NOT NULL,
-                chunk_index INTEGER NOT NULL,
-                content TEXT NOT NULL,
-                chunk_type TEXT DEFAULT 'text',
-                start_char INTEGER,
-                end_char INTEGER,
-                token_count INTEGER,
-                header_path TEXT,
-                level INTEGER DEFAULT 0,
-                prev_chunk_id INTEGER,
-                next_chunk_id INTEGER,
-                content_hash TEXT NOT NULL,
-                created_at TEXT NOT NULL,
-                parent_title TEXT DEFAULT NULL,
-                section_hierarchy TEXT DEFAULT NULL,
-                granularity_level TEXT DEFAULT 'medium',
-                chunk_position_ratio REAL DEFAULT 0.5,
-                sibling_count INTEGER DEFAULT 1,
-                depth_level INTEGER DEFAULT 0,
-                contains_code BOOLEAN DEFAULT 0,
-                contains_table BOOLEAN DEFAULT 0,
-                keywords TEXT DEFAULT '[]',
-                original_content TEXT DEFAULT NULL,
-                is_contextually_enriched BOOLEAN DEFAULT 0,
-                embedding BLOB,
-                FOREIGN KEY (parent_id) REFERENCES session_memories(id) ON DELETE CASCADE,
-                UNIQUE(parent_id, chunk_index)
-            )
-        """)
-
-        # ========================================
-        # MIGRATION: Add missing columns to existing databases
-        # ========================================
-        try:
-            migrations_applied = self._migrate_schema(conn)
-            if migrations_applied > 0:
-                logger.info(f"Database migration completed: {migrations_applied} column(s) added")
-        except sqlite3.Error as e:
-            logger.warning(f"Schema migration failed: {e}")
-            logger.warning("This may cause issues with existing databases.")
-            logger.warning("Please check database integrity and consider manual migration.")
-            # Don't raise - allow server to continue (may fail later if schema incompatible)
-        # ========================================
-
-        # Vector search table using sqlite-vec
-        conn.execute("""
-            CREATE TABLE IF NOT EXISTS vec_session_search (
-                rowid INTEGER PRIMARY KEY,
-                memory_id INTEGER NOT NULL,
-                chunk_id INTEGER,
-                embedding BLOB NOT NULL,
-                FOREIGN KEY (memory_id) REFERENCES session_memories(id) ON DELETE CASCADE
-            )
-        """)
-
-        # Try to create vector index (will fail gracefully if vec0 not loaded)
-        try:
-            conn.execute("""
-                CREATE VIRTUAL TABLE IF NOT EXISTS vec_session_index
-                USING vec0(
-                    rowid INTEGER PRIMARY KEY,
-                    embedding FLOAT[1536]
-                )
-            """)
-        except sqlite3.OperationalError:
-            # Vector index unavailable - semantic search will be disabled
-            pass
-
-        # Indexes for performance
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_memory_agent_session ON session_memories(agent_id, session_id)")
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_memory_session_iter ON session_memories(session_id, session_iter)")
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_memory_task_code ON session_memories(task_code)")
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_memory_type ON session_memories(memory_type)")
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_chunk_parent ON memory_chunks(parent_id)")
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_chunks_granularity ON memory_chunks(granularity_level)")
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_chunks_section ON memory_chunks(section_hierarchy)")
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_chunks_parent_title ON memory_chunks(parent_title)")
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_chunks_contains_code ON memory_chunks(contains_code)")
-
-        conn.commit()
-        conn.close()
-
-    def store_memory(
+    def _store_memory_impl(
         self,
         memory_type: str,
         agent_id: str,
@@ -648,7 +344,7 @@ class SessionMemoryStore:
                 "message": str(e)
             }
 
-    def search_memories(
+    def _search_memories_impl(
         self,
         memory_type: str = None,
         agent_id: str = None,
@@ -771,7 +467,7 @@ class SessionMemoryStore:
                 "message": str(e)
             }
 
-    def search_with_granularity(
+    def _search_with_granularity_impl(
         self,
         memory_type: str,
         granularity: str,
@@ -842,7 +538,7 @@ class SessionMemoryStore:
                 "message": "Section-level search requires embedding infrastructure"
             }
 
-    def expand_chunk_context(
+    def _expand_chunk_context_impl(
         self,
         memory_id: int,
         chunk_index: int,
@@ -920,7 +616,7 @@ class SessionMemoryStore:
                 "message": str(e)
             }
 
-    def load_session_context_for_task(
+    def _load_session_context_for_task_impl(
         self,
         agent_id: str,
         session_id: str,
@@ -991,7 +687,7 @@ class SessionMemoryStore:
                 "message": str(e)
             }
 
-    def get_memory(self, memory_id: int) -> dict[str, Any]:
+    def _get_memory_impl(self, memory_id: int) -> dict[str, Any]:
         """Retrieve specific memory by ID."""
         try:
             conn = self._get_connection()
@@ -1040,7 +736,7 @@ class SessionMemoryStore:
                 "message": str(e)
             }
 
-    def get_session_stats(
+    def _get_session_stats_impl(
         self,
         agent_id: str = None,
         session_id: str = None
@@ -1117,7 +813,7 @@ class SessionMemoryStore:
                 "message": str(e)
             }
 
-    def list_sessions(
+    def _list_sessions_impl(
         self,
         agent_id: str = None,
         limit: int = 20
@@ -1175,7 +871,7 @@ class SessionMemoryStore:
                 "message": str(e)
             }
 
-    def reconstruct_document(self, memory_id: int) -> dict[str, Any]:
+    def _reconstruct_document_impl(self, memory_id: int) -> dict[str, Any]:
         """
         Reconstruct a document from its chunks.
 
@@ -1254,7 +950,7 @@ class SessionMemoryStore:
                 "message": str(e)
             }
 
-    def write_document_to_file(
+    def _write_document_to_file_impl(
         self,
         memory_id: int,
         output_path: str = None,
@@ -1446,7 +1142,7 @@ class SessionMemoryStore:
                 "memory_id": memory_id
             }
 
-    def delete_memory(self, memory_id: int) -> dict[str, Any]:
+    def _delete_memory_impl(self, memory_id: int) -> dict[str, Any]:
         """
         Delete a memory and all associated data.
 
