@@ -16,6 +16,12 @@ def run_migrations(db_path: str) -> None:
     conn = sqlite3.connect(db_path)
 
     try:
+        # Enable WAL mode FIRST (before creating tables) for better concurrency
+        conn.execute("PRAGMA journal_mode=WAL")
+
+        # Set synchronous mode to NORMAL for performance (safe with WAL)
+        conn.execute("PRAGMA synchronous=NORMAL")
+
         # Enable foreign key constraints
         conn.execute("PRAGMA foreign_keys = ON")
 
