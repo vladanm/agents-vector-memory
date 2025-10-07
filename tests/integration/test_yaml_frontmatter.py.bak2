@@ -148,7 +148,7 @@ def test_chunk_token_counts(store, yaml_memory_id, temp_db):
     assert max_tokens <= 2000, f"Maximum chunk size ({max_tokens}) exceeds limit"
 
     # Average should be reasonable
-    assert 20 <= avg_tokens <= 1500, f"Average chunk size ({avg_tokens:.1f}) outside expected range"  # Markdown headers can be small
+    assert 200 <= avg_tokens <= 1500, f"Average chunk size ({avg_tokens:.1f}) outside expected range"
 
 
 @pytest.mark.integration
@@ -247,4 +247,4 @@ def test_chunk_statistics(store, yaml_memory_id, temp_db):
     # Validate token ranges
     assert min_tokens >= 5, f"Minimum tokens ({min_tokens}) below threshold (headers can be small)"
     assert max_tokens <= 2000, f"Maximum tokens ({max_tokens}) exceeds limit"
-    assert 20 <= avg_tokens <= 1500, f"Average tokens ({avg_tokens:.1f}) outside range"  # Markdown headers can be small
+    assert 200 <= avg_tokens <= 1500, f"Average tokens ({avg_tokens:.1f}) outside range"

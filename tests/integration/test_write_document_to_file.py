@@ -154,7 +154,8 @@ def test_all_error_codes_implemented(store):
     """Verify all required error codes are in write_document_to_file implementation."""
     import inspect
 
-    source = inspect.getsource(store.write_document_to_file)
+    # Get the actual implementation, not just the delegate
+    source = inspect.getsource(store._write_document_to_file_impl)
 
     required_codes = [
         'MEMORY_NOT_FOUND',

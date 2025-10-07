@@ -34,8 +34,6 @@ def test_concurrent_writes(temp_db, sample_memory):
         try:
             memory = sample_memory.copy()
             memory["task_code"] = f"concurrent-{idx}"
-            # Make content unique to avoid UNIQUE constraint on content_hash
-            memory["content"] = memory["content"] + f" (thread {idx})"
             result = store_instance.store_memory(**memory)
             results.append(result)
         except Exception as e:
@@ -53,8 +51,7 @@ def test_concurrent_writes(temp_db, sample_memory):
 
     assert len(errors) == 0, f"Errors occurred: {errors}"
     assert len(results) == 3
-    success_count = sum(1 for r in results if r["success"])
-    assert success_count >= len(results) - 1, f"Too many failures: {success_count}/{len(results)}"
+    assert all(r["success"] for r in results), "Not all writes succeeded"
 
 
 @pytest.mark.integration

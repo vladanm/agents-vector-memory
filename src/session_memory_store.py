@@ -320,6 +320,22 @@ class SessionMemoryStore:
                     "message": f"Memory type must be one of: {VALID_MEMORY_TYPES}"
                 }
 
+            # Validate agent_id (must not be empty)
+            if not agent_id or agent_id.strip() == "":
+                return {
+                    "success": False,
+                    "error": "Invalid agent_id",
+                    "message": "agent_id cannot be empty"
+                }
+
+            # Validate session_id (must not be empty)
+            if not session_id or session_id.strip() == "":
+                return {
+                    "success": False,
+                    "error": "Invalid session_id",
+                    "message": "session_id cannot be empty"
+                }
+
             # Get memory type config
             config = get_memory_type_config(memory_type)
 
@@ -898,7 +914,7 @@ class SessionMemoryStore:
                 "unique_tasks": stats_row[4],
                 "max_session_iter": stats_row[5] or 0,
                 "avg_content_length": round(stats_row[6] or 0, 2),
-                "total_access_count": stats_row[8] or 0,
+                "total_access_count": stats_row[7] or 0,
                 "memory_type_breakdown": {row[0]: row[1] for row in type_rows},
                 "filters": {
                     "agent_id": agent_id,
