@@ -32,12 +32,6 @@ try:
 except ImportError:
     YAML_AVAILABLE = False
 
-try:
-    import sqlite_vec
-    SQLITE_VEC_AVAILABLE = True
-except ImportError:
-    SQLITE_VEC_AVAILABLE = False
-
 from .chunking import DocumentChunker, ChunkingConfig
 from .memory_types import ContentFormat, ChunkEntry, get_memory_type_config
 

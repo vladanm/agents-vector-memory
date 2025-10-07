@@ -1,0 +1,250 @@
+"""
+Integration tests for YAML frontmatter document storage and processing.
+
+Tests that documents with YAML frontmatter are properly:
+- Stored in the database
+- Chunked with metadata preservation
+- Retrievable with frontmatter intact
+"""
+
+import pytest
+
+
+# Test document with YAML frontmatter
+TEST_CONTENT = """---
+title: LangChain Text Splitters Reference
+category: documentation
+tags: [langchain, chunking, markdown]
+---
+
+# LangChain Text Splitters
+
+## Overview
+LangChain provides powerful text splitting utilities for chunking documents while preserving semantic structure and maintaining reasonable chunk sizes.
+
+## MarkdownHeaderTextSplitter
+This splitter intelligently splits markdown documents based on header hierarchy, maintaining context and structure throughout the chunking process.
+
+### Key Features
+The MarkdownHeaderTextSplitter preserves header metadata in each chunk, allowing for better context preservation and semantic search capabilities.
+
+### Configuration Options
+You can customize which header levels to split on, whether to strip headers from content, and how to handle metadata propagation.
+
+## RecursiveCharacterTextSplitter
+Works in conjunction with the markdown splitter to enforce size constraints on chunks.
+
+### Size Management
+The recursive splitter ensures chunks don't exceed specified token limits while respecting natural text boundaries like paragraphs and sentences.
+
+### Overlap Strategy
+Configurable overlap between chunks helps maintain context across chunk boundaries, improving semantic coherence.
+
+## Integration Benefits
+Using LangChain splitters eliminates custom chunking logic and provides battle-tested, well-maintained code for text processing.
+
+### Performance
+The LangChain implementation is optimized for speed and memory efficiency, handling large documents with ease.
+
+### Maintenance
+By leveraging a widely-used library, we benefit from community contributions, bug fixes, and ongoing improvements.
+"""
+
+
+@pytest.fixture
+def yaml_memory_id(store):
+    """Store a document with YAML frontmatter and return its ID.
+
+    Returns:
+        int: Memory ID of the stored document
+    """
+    result = store.store_memory(
+        memory_type='knowledge_base',
+        agent_id='test-agent',
+        session_id='test-yaml',
+        session_iter=1,
+        task_code='yaml-test',
+        content=TEST_CONTENT,
+        title='LangChain Text Splitters Reference',
+        description='Documentation with YAML frontmatter',
+        tags=['langchain', 'chunking', 'markdown'],
+        auto_chunk=True
+    )
+
+    assert result.get('success'), f"Failed to store YAML document: {result}"
+    return result['memory_id']
+
+
+@pytest.mark.integration
+def test_yaml_frontmatter_stored(store, yaml_memory_id, temp_db):
+    """Test that document with YAML frontmatter is stored correctly."""
+    import sqlite3
+
+    conn = sqlite3.connect(temp_db)
+    cursor = conn.execute("""
+        SELECT id, memory_type, created_at
+        FROM session_memories
+        WHERE id = ?
+    """, (yaml_memory_id,))
+
+    memory = cursor.fetchone()
+    conn.close()
+
+    assert memory is not None, "Memory not found in database"
+    memory_id, memory_type, created_at = memory
+
+    assert memory_id == yaml_memory_id
+    assert memory_type == 'knowledge_base'
+    assert created_at is not None
+
+
+@pytest.mark.integration
+def test_yaml_document_chunked(store, yaml_memory_id, temp_db):
+    """Test that document is properly chunked."""
+    import sqlite3
+
+    conn = sqlite3.connect(temp_db)
+    cursor = conn.execute("""
+        SELECT chunk_index, token_count, level, header_path, content
+        FROM memory_chunks
+        WHERE parent_id = ?
+        ORDER BY chunk_index
+    """, (yaml_memory_id,))
+
+    chunks = cursor.fetchall()
+    conn.close()
+
+    assert len(chunks) > 0, "No chunks found for YAML document"
+
+    # Should have reasonable number of chunks (not too many)
+    assert len(chunks) <= 10, f"Too many chunks: {len(chunks)}"
+
+
+@pytest.mark.integration
+def test_chunk_token_counts(store, yaml_memory_id, temp_db):
+    """Test that chunk token counts are within expected ranges."""
+    import sqlite3
+
+    conn = sqlite3.connect(temp_db)
+    cursor = conn.execute("""
+        SELECT token_count
+        FROM memory_chunks
+        WHERE parent_id = ?
+    """, (yaml_memory_id,))
+
+    token_counts = [row[0] for row in cursor.fetchall()]
+    conn.close()
+
+    assert len(token_counts) > 0, "No chunks found"
+
+    min_tokens = min(token_counts)
+    max_tokens = max(token_counts)
+    avg_tokens = sum(token_counts) / len(token_counts)
+
+    # Chunks should meet minimum size requirement (with some tolerance)
+    assert min_tokens >= 100, f"Minimum chunk size ({min_tokens}) too small"
+
+    # Chunks should not exceed maximum size
+    assert max_tokens <= 2000, f"Maximum chunk size ({max_tokens}) exceeds limit"
+
+    # Average should be reasonable
+    assert 200 <= avg_tokens <= 1500, f"Average chunk size ({avg_tokens:.1f}) outside expected range"
+
+
+@pytest.mark.integration
+def test_chunk_header_preservation(store, yaml_memory_id, temp_db):
+    """Test that chunk header paths are preserved."""
+    import sqlite3
+
+    conn = sqlite3.connect(temp_db)
+    cursor = conn.execute("""
+        SELECT chunk_index, header_path
+        FROM memory_chunks
+        WHERE parent_id = ?
+        ORDER BY chunk_index
+    """, (yaml_memory_id,))
+
+    chunks = cursor.fetchall()
+    conn.close()
+
+    # Each chunk should have header path metadata
+    for idx, header_path in chunks:
+        # Header path can be empty string for document-level chunks, but should exist
+        assert header_path is not None, f"Chunk {idx} missing header_path"
+
+
+@pytest.mark.integration
+def test_chunk_content_preview(store, yaml_memory_id, temp_db):
+    """Test that chunk content is stored and retrievable."""
+    import sqlite3
+
+    conn = sqlite3.connect(temp_db)
+    cursor = conn.execute("""
+        SELECT chunk_index, content
+        FROM memory_chunks
+        WHERE parent_id = ?
+        ORDER BY chunk_index
+        LIMIT 1
+    """, (yaml_memory_id,))
+
+    chunk = cursor.fetchone()
+    conn.close()
+
+    assert chunk is not None, "No chunks found"
+    chunk_index, content = chunk
+
+    assert len(content) > 0, "Chunk content is empty"
+    assert isinstance(content, str), "Chunk content should be string"
+
+
+@pytest.mark.integration
+def test_yaml_frontmatter_in_chunks(store, yaml_memory_id, temp_db):
+    """Test that YAML frontmatter appears in first chunk or is processed."""
+    import sqlite3
+
+    conn = sqlite3.connect(temp_db)
+    cursor = conn.execute("""
+        SELECT content
+        FROM memory_chunks
+        WHERE parent_id = ?
+        ORDER BY chunk_index
+        LIMIT 1
+    """, (yaml_memory_id,))
+
+    first_chunk = cursor.fetchone()
+    conn.close()
+
+    assert first_chunk is not None, "No first chunk found"
+    content = first_chunk[0]
+
+    # Either frontmatter is preserved or content starts with actual document
+    # (frontmatter might be stripped during processing)
+    assert ('---' in content or 'LangChain' in content), \
+        "First chunk should contain either frontmatter or document content"
+
+
+@pytest.mark.integration
+def test_chunk_statistics(store, yaml_memory_id, temp_db):
+    """Test overall chunk statistics meet expectations."""
+    import sqlite3
+
+    conn = sqlite3.connect(temp_db)
+    cursor = conn.execute("""
+        SELECT COUNT(*), MIN(token_count), MAX(token_count), AVG(token_count)
+        FROM memory_chunks
+        WHERE parent_id = ?
+    """, (yaml_memory_id,))
+
+    stats = cursor.fetchone()
+    conn.close()
+
+    assert stats is not None, "No chunk statistics available"
+    chunk_count, min_tokens, max_tokens, avg_tokens = stats
+
+    # Should have at least 2 chunks for this document
+    assert chunk_count >= 2, f"Expected at least 2 chunks, got {chunk_count}"
+
+    # Validate token ranges
+    assert min_tokens >= 100, f"Minimum tokens ({min_tokens}) below threshold"
+    assert max_tokens <= 2000, f"Maximum tokens ({max_tokens}) exceeds limit"
+    assert 200 <= avg_tokens <= 1500, f"Average tokens ({avg_tokens:.1f}) outside range"

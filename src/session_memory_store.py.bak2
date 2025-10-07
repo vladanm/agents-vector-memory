@@ -99,6 +99,41 @@ class SessionMemoryStore:
         run_migrations(self.db_path)
 
 
+    def _get_connection(self) -> sqlite3.Connection:
+        """
+        Get database connection with WAL mode and optimizations.
+
+        Returns:
+            sqlite3.Connection: Database connection configured with:
+                - WAL (Write-Ahead Logging) mode for better concurrency
+                - NORMAL synchronous mode for performance
+                - Foreign keys enabled for referential integrity
+                - Memory-based temp storage for performance
+                - Memory-mapped I/O for large databases
+
+        Note:
+            This method creates a new connection each time it is called.
+            The caller is responsible for closing the connection.
+        """
+        conn = sqlite3.connect(self.db_path)
+
+        # Enable WAL mode for better concurrency
+        conn.execute("PRAGMA journal_mode=WAL")
+
+        # Set synchronous mode to NORMAL (faster than FULL, still safe with WAL)
+        conn.execute("PRAGMA synchronous=NORMAL")
+
+        # Enable foreign key constraints
+        conn.execute("PRAGMA foreign_keys=ON")
+
+        # Use memory for temporary storage (faster)
+        conn.execute("PRAGMA temp_store=MEMORY")
+
+        # Enable memory-mapped I/O (faster for large databases)
+        conn.execute("PRAGMA mmap_size=30000000000")
+
+        return conn
+
     @property
     def chunker(self) -> 'DocumentChunker':
         """Lazy initialization of chunker"""
