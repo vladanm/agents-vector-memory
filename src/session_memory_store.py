@@ -556,8 +556,14 @@ class SessionMemoryStore:
 
             # Execute query
             params.append(limit)
+            # Use row_factory to get dict-like access
+            conn.row_factory = sqlite3.Row
+
             rows = conn.execute(f"""
-                SELECT * FROM session_memories
+                SELECT id, memory_type, agent_id, session_id, session_iter, task_code,
+                       content, title, description, tags, metadata, content_hash,
+                       created_at, updated_at, accessed_at, access_count
+                FROM session_memories
                 {where_clause}
                 {order_clause}
                 LIMIT ?
@@ -569,22 +575,22 @@ class SessionMemoryStore:
             results = []
             for row in rows:
                 results.append({
-                    "id": row[0],
-                    "memory_type": row[1],
-                    "agent_id": row[2],
-                    "session_id": row[3],
-                    "session_iter": row[4],
-                    "task_code": row[5],
-                    "content": row[6],
-                    "title": row[8],
-                    "description": row[9],
-                    "tags": json.loads(row[10]) if row[10] else [],
-                    "metadata": json.loads(row[11]) if row[11] else {},
-                    "content_hash": row[12],
-                    "created_at": row[14],
-                    "updated_at": row[15],
-                    "accessed_at": row[16],
-                    "access_count": row[17],
+                    "id": row["id"],
+                    "memory_type": row["memory_type"],
+                    "agent_id": row["agent_id"],
+                    "session_id": row["session_id"],
+                    "session_iter": row["session_iter"],
+                    "task_code": row["task_code"],
+                    "content": row["content"],
+                    "title": row["title"],
+                    "description": row["description"],
+                    "tags": json.loads(row["tags"]) if row["tags"] else [],
+                    "metadata": json.loads(row["metadata"]) if row["metadata"] else {},
+                    "content_hash": row["content_hash"],
+                    "created_at": row["created_at"],
+                    "updated_at": row["updated_at"],
+                    "accessed_at": row["accessed_at"],
+                    "access_count": row["access_count"],
                     "similarity": 2.0,  # Perfect match for filtered results
                     "source_type": "scoped"
                 })
@@ -815,8 +821,11 @@ class SessionMemoryStore:
             conn = self._get_connection()
 
             # Look for previous session context with matching task_code
+            conn.row_factory = sqlite3.Row
             rows = conn.execute("""
-                SELECT * FROM session_memories
+                SELECT id, memory_type, agent_id, session_id, session_iter, task_code,
+                       content, title, description, tags, metadata, created_at
+                FROM session_memories
                 WHERE memory_type = 'session_context'
                 AND agent_id = ?
                 AND session_id = ?
@@ -830,18 +839,18 @@ class SessionMemoryStore:
             if rows:
                 row = rows[0]
                 context = {
-                    "id": row[0],
-                    "memory_type": row[1],
-                    "agent_id": row[2],
-                    "session_id": row[3],
-                    "session_iter": row[4],
-                    "task_code": row[5],
-                    "content": row[6],
-                    "title": row[8],
-                    "description": row[9],
-                    "tags": json.loads(row[10]) if row[10] else [],
-                    "metadata": json.loads(row[11]) if row[11] else {},
-                    "created_at": row[14]
+                    "id": row["id"],
+                    "memory_type": row["memory_type"],
+                    "agent_id": row["agent_id"],
+                    "session_id": row["session_id"],
+                    "session_iter": row["session_iter"],
+                    "task_code": row["task_code"],
+                    "content": row["content"],
+                    "title": row["title"],
+                    "description": row["description"],
+                    "tags": json.loads(row["tags"]) if row["tags"] else [],
+                    "metadata": json.loads(row["metadata"]) if row["metadata"] else {},
+                    "created_at": row["created_at"]
                 }
 
                 return {
@@ -874,8 +883,12 @@ class SessionMemoryStore:
         try:
             conn = self._get_connection()
 
+            conn.row_factory = sqlite3.Row
             row = conn.execute("""
-                SELECT * FROM session_memories WHERE id = ?
+                SELECT id, memory_type, agent_id, session_id, session_iter, task_code,
+                       content, title, description, tags, metadata, content_hash,
+                       created_at, updated_at, accessed_at, access_count
+                FROM session_memories WHERE id = ?
             """, (memory_id,)).fetchone()
 
             conn.close()
@@ -889,22 +902,22 @@ class SessionMemoryStore:
                 }
 
             memory = {
-                "id": row[0],
-                "memory_type": row[1],
-                "agent_id": row[2],
-                "session_id": row[3],
-                "session_iter": row[4],
-                "task_code": row[5],
-                "content": row[6],
-                "title": row[8],
-                "description": row[9],
-                "tags": json.loads(row[10]) if row[10] else [],
-                "metadata": json.loads(row[11]) if row[11] else {},
-                "content_hash": row[12],
-                "created_at": row[14],
-                "updated_at": row[15],
-                "accessed_at": row[16],
-                "access_count": row[17]
+                "id": row["id"],
+                "memory_type": row["memory_type"],
+                "agent_id": row["agent_id"],
+                "session_id": row["session_id"],
+                "session_iter": row["session_iter"],
+                "task_code": row["task_code"],
+                "content": row["content"],
+                "title": row["title"],
+                "description": row["description"],
+                "tags": json.loads(row["tags"]) if row["tags"] else [],
+                "metadata": json.loads(row["metadata"]) if row["metadata"] else {},
+                "content_hash": row["content_hash"],
+                "created_at": row["created_at"],
+                "updated_at": row["updated_at"],
+                "accessed_at": row["accessed_at"],
+                "access_count": row["access_count"]
             }
 
             return {

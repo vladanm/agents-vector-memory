@@ -18,7 +18,7 @@ def run_migrations(db_path: str) -> None:
     try:
         # Enable extension loading (required for sqlite-vec)
         conn.enable_load_extension(True)
-        
+
         # Load sqlite-vec extension for vector search
         try:
             import sqlite_vec
@@ -27,7 +27,7 @@ def run_migrations(db_path: str) -> None:
             # If sqlite_vec not available, continue without it
             # Vector search features will not work but basic functionality will
             pass
-        
+
         # Disable extension loading for security
         conn.enable_load_extension(False)
 
@@ -66,6 +66,33 @@ def run_migrations(db_path: str) -> None:
                 auto_chunked INTEGER DEFAULT 0
             )
         """)
+
+        # ============================================================
+        # SCHEMA UPGRADE: Add missing columns to existing databases
+        # ============================================================
+        # Check if we need to add missing columns (for databases created with old schema)
+        cursor = conn.execute("PRAGMA table_info(session_memories)")
+        existing_columns = {row[1] for row in cursor.fetchall()}
+
+        # Add original_content column if missing (should be after content, but ALTER TABLE adds at end)
+        if 'original_content' not in existing_columns:
+            conn.execute("ALTER TABLE session_memories ADD COLUMN original_content TEXT")
+
+        # Add embedding column if missing
+        if 'embedding' not in existing_columns:
+            conn.execute("ALTER TABLE session_memories ADD COLUMN embedding BLOB")
+
+        # Add auto_chunk column if missing
+        if 'auto_chunk' not in existing_columns:
+            conn.execute("ALTER TABLE session_memories ADD COLUMN auto_chunk INTEGER DEFAULT 0")
+
+        # Add chunk_count column if missing
+        if 'chunk_count' not in existing_columns:
+            conn.execute("ALTER TABLE session_memories ADD COLUMN chunk_count INTEGER DEFAULT 0")
+
+        # Add auto_chunked column if missing
+        if 'auto_chunked' not in existing_columns:
+            conn.execute("ALTER TABLE session_memories ADD COLUMN auto_chunked INTEGER DEFAULT 0")
 
         # Create embeddings table
         conn.execute("""
@@ -133,6 +160,19 @@ def run_migrations(db_path: str) -> None:
         except Exception:
             # If vec0 extension not available, skip vector search table
             # This allows tests to run even without the extension
+            pass
+
+        # Create vector search virtual table for session memories (requires sqlite-vec extension)
+        try:
+            conn.execute("""
+                CREATE VIRTUAL TABLE IF NOT EXISTS vec_session_search
+                USING vec0(
+                    memory_id INTEGER PRIMARY KEY,
+                    embedding float[384]
+                )
+            """)
+        except Exception:
+            # If vec0 extension not available, skip vector search table
             pass
 
         # Create indexes
