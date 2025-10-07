@@ -632,9 +632,11 @@ class SessionMemoryStore:
         Returns:
             Dict with search results at specified granularity
         """
-    
+        # For now, this is a placeholder that calls the filtered search
+        # Full semantic search requires embedding infrastructure
+
         if granularity == "coarse":
-            # Return full documents - scoped search without embeddings
+            # Return full documents - CRITICAL FIX: Add granularity field
             result = self.search_memories(
                 memory_type=memory_type,
                 agent_id=agent_id,
@@ -644,243 +646,32 @@ class SessionMemoryStore:
                 query=query,
                 limit=limit
             )
+            # Add granularity field to match GranularSearchResult schema
             result["granularity"] = "coarse"
             return result
-    
         elif granularity == "fine":
-            # Return individual chunks using vector search
-            try:
-                # Get embedding model
-                model = self.embedding_model
-                if model is None:
-                    return {
-                        "success": True,
-                        "results": [],
-                        "total_results": 0,
-                        "granularity": "fine",
-                        "message": "Embedding model not available",
-                        "error": None
-                    }
-            
-                # Generate query embedding
-                query_embedding = model.encode([query], show_progress_bar=False)[0]
-                query_bytes = query_embedding.tobytes()
-            
-                # Build filter conditions
-                filter_conditions = ["m.memory_type = ?"]
-                filter_params = [memory_type]
-            
-                if agent_id:
-                    filter_conditions.append("m.agent_id = ?")
-                    filter_params.append(agent_id)
-                if session_id:
-                    filter_conditions.append("m.session_id = ?")
-                    filter_params.append(session_id)
-                if session_iter is not None:
-                    filter_conditions.append("m.session_iter = ?")
-                    filter_params.append(session_iter)
-                if task_code:
-                    filter_conditions.append("m.task_code = ?")
-                    filter_params.append(task_code)
-            
-                filter_clause = " AND " + " AND ".join(filter_conditions) if filter_conditions else ""
-            
-                # Vector search over chunks
-                conn = self._get_connection()
-            
-                sql = f"""
-                    SELECT 
-                        vc.chunk_id,
-                        mc.parent_id as memory_id,
-                        mc.chunk_index,
-                        mc.content,
-                        mc.chunk_type,
-                        mc.header_path,
-                        mc.level,
-                        distance
-                    FROM vec_chunk_search vc
-                    JOIN memory_chunks mc ON vc.chunk_id = mc.id
-                    JOIN session_memories m ON mc.parent_id = m.id
-                    WHERE vc.embedding MATCH ?
-                        {filter_clause}
-                    ORDER BY distance
-                    LIMIT ?
-                """
-            
-                params = [query_bytes] + filter_params + [limit * 3]  # Get more for filtering
-                rows = conn.execute(sql, params).fetchall()
-                conn.close()
-            
-                # Filter by similarity threshold and format results
-                results = []
-                for row in rows:
-                    distance = row[7]
-                    similarity = 1.0 - distance  # Convert distance to similarity
-                
-                    if similarity >= similarity_threshold:
-                        results.append({
-                            "chunk_id": row[0],
-                            "memory_id": row[1],
-                            "chunk_index": row[2],
-                            "chunk_content": row[3],
-                            "chunk_type": row[4],
-                            "header_path": row[5],
-                            "level": row[6],
-                            "similarity": float(similarity),
-                            "source": "chunk",
-                            "granularity": "fine"
-                        })
-                
-                    if len(results) >= limit:
-                        break
-            
-                return {
-                    "success": True,
-                    "results": results,
-                    "total_results": len(results),
-                    "granularity": "fine",
-                    "message": None,
-                    "error": None
-                }
-            
-            except Exception as e:
-                logger.error(f"Fine granularity search failed: {e}", exc_info=True)
-                return {
-                    "success": False,
-                    "results": [],
-                    "total_results": 0,
-                    "granularity": "fine",
-                    "message": str(e),
-                    "error": "Search failed"
-                }
-    
-        else:  # medium granularity
-            # Return section-level results with auto-merging
-            try:
-                # First do fine search to find matching chunks
-                fine_result = self._search_with_granularity_impl(
-                    memory_type, "fine", query, agent_id, session_id,
-                    session_iter, task_code, limit * 5,  # Get more chunks for section grouping
-                    similarity_threshold, auto_merge_threshold
-                )
-            
-                if not fine_result["success"] or not fine_result["results"]:
-                    return {
-                        "success": True,
-                        "results": [],
-                        "total_results": 0,
-                        "granularity": "medium",
-                        "message": fine_result.get("message", "No matching chunks found"),
-                        "error": None
-                    }
-            
-                # Group chunks by section (using header_path parent)
-                conn = self._get_connection()
-                sections = {}
-            
-                for chunk_result in fine_result["results"]:
-                    memory_id = chunk_result["memory_id"]
-                    header_path = chunk_result["header_path"]
-                
-                    # Get section key (parent header, e.g., "## Natural Language Processing")
-                    if not header_path or header_path == "/":
-                        section_key = (memory_id, "/")
-                    else:
-                        # Extract parent section (last level-2 heading or root)
-                        parts = [p.strip() for p in header_path.split(">") if p.strip()]
-                        # Find the highest level heading (usually level 2: ##)
-                        section_key = (memory_id, parts[0] if parts else "/")
-                
-                    if section_key not in sections:
-                        sections[section_key] = {
-                            "memory_id": memory_id,
-                            "section_header": section_key[1],
-                            "matching_chunks": [],
-                            "all_chunk_ids": set()
-                        }
-                
-                    sections[section_key]["matching_chunks"].append(chunk_result)
-                    sections[section_key]["all_chunk_ids"].add(chunk_result["chunk_id"])
-            
-                # For each section, get all chunks and determine if we should merge
-                section_results = []
-            
-                for section_key, section_data in sections.items():
-                    memory_id = section_data["memory_id"]
-                    section_header = section_data["section_header"]
-                
-                    # Get all chunks in this section
-                    if section_header == "/":
-                        # Root level - get all chunks
-                        section_chunks = conn.execute("""
-                            SELECT id, chunk_index, content, chunk_type, header_path, level
-                            FROM memory_chunks
-                            WHERE parent_id = ?
-                            ORDER BY chunk_index
-                        """, (memory_id,)).fetchall()
-                    else:
-                        # Specific section - get chunks with matching header prefix
-                        section_chunks = conn.execute("""
-                            SELECT id, chunk_index, content, chunk_type, header_path, level
-                            FROM memory_chunks
-                            WHERE parent_id = ?
-                                AND (header_path = ? OR header_path LIKE ?)
-                            ORDER BY chunk_index
-                        """, (memory_id, section_header, f"{section_header} >%")).fetchall()
-                
-                    if not section_chunks:
-                        continue
-                
-                    # Calculate match ratio
-                    total_chunks = len(section_chunks)
-                    matched_chunks = len(section_data["matching_chunks"])
-                    match_ratio = matched_chunks / total_chunks if total_chunks > 0 else 0
-                
-                    # Build section content
-                    section_content = "\n\n".join([chunk[2] for chunk in section_chunks])
-                
-                    # Get average similarity of matching chunks
-                    avg_similarity = sum(c["similarity"] for c in section_data["matching_chunks"]) / matched_chunks
-                
-                    section_results.append({
-                        "memory_id": memory_id,
-                        "section_header": section_header,
-                        "section_content": section_content,
-                        "header_path": section_header,
-                        "chunks_in_section": total_chunks,
-                        "matched_chunks": matched_chunks,
-                        "match_ratio": float(match_ratio),
-                        "auto_merged": match_ratio >= auto_merge_threshold,
-                        "similarity": float(avg_similarity),
-                        "source": "expanded_section",
-                        "granularity": "medium"
-                    })
-            
-                conn.close()
-            
-                # Sort by similarity and limit
-                section_results.sort(key=lambda x: x["similarity"], reverse=True)
-                section_results = section_results[:limit]
-            
-                return {
-                    "success": True,
-                    "results": section_results,
-                    "total_results": len(section_results),
-                    "granularity": "medium",
-                    "message": None,
-                    "error": None
-                }
-            
-            except Exception as e:
-                logger.error(f"Medium granularity search failed: {e}", exc_info=True)
-                return {
-                    "success": False,
-                    "results": [],
-                    "total_results": 0,
-                    "granularity": "medium",
-                    "message": str(e),
-                    "error": "Search failed"
-                }
+            # Return individual chunks
+            # TODO: Implement chunk-level search
+            return {
+                "success": True,
+                "results": [],
+                "total_results": 0,
+                "granularity": "fine",
+                "message": "Chunk-level search requires embedding infrastructure",
+                "error": None
+            }
+        else:  # medium
+            # Return section-level results
+            # TODO: Implement section-level search with auto-merging
+            return {
+                "success": True,
+                "results": [],
+                "total_results": 0,
+                "granularity": "medium",
+                "message": "Section-level search requires embedding infrastructure",
+                "error": None
+            }
+
     def _expand_chunk_context_impl(
         self,
         memory_id: int,
