@@ -389,7 +389,7 @@ class SessionMemoryStore:
                 chunks = self.chunker.chunk_document(content, 0, chunk_metadata)
 
                 # Generate embeddings for all chunks in batch (10-50x faster than sequential)
-                if self.embedding_model and chunks:
+                if chunks and self.embedding_model:
                     chunk_texts = [chunk.content for chunk in chunks]
                     try:
                         embeddings = self.embedding_model.encode(chunk_texts, batch_size=32, show_progress_bar=False)
