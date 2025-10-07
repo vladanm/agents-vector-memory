@@ -666,8 +666,8 @@ class SessionMemoryStore:
         # Full semantic search requires embedding infrastructure
 
         if granularity == "coarse":
-            # Return full documents
-            return self.search_memories(
+            # Return full documents - CRITICAL FIX: Add granularity field
+            result = self.search_memories(
                 memory_type=memory_type,
                 agent_id=agent_id,
                 session_id=session_id,
@@ -676,6 +676,9 @@ class SessionMemoryStore:
                 query=query,
                 limit=limit
             )
+            # Add granularity field to match GranularSearchResult schema
+            result["granularity"] = "coarse"
+            return result
         elif granularity == "fine":
             # Return individual chunks
             # TODO: Implement chunk-level search
