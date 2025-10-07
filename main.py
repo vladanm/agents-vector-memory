@@ -55,6 +55,12 @@ from mcp.server.fastmcp import FastMCP
 from src.config import Config
 from src.security import validate_working_dir, SecurityError
 from src.session_memory_store import SessionMemoryStore
+from src.mcp_types import (
+    StoreMemoryResult, SearchMemoriesResult, GranularSearchResult,
+    GetMemoryResult, ExpandChunkContextResult, LoadSessionContextResult,
+    SessionStatsResult, ListSessionsResult, ReconstructDocumentResult,
+    WriteDocumentResult, DeleteMemoryResult, CleanupMemoriesResult
+)
 
 # Initialize global objects
 config = Config()
@@ -82,7 +88,7 @@ def initialize_store(working_dir: str = None, database_path: str = None) -> None
         # Create parent directories if they don't exist
         db_path.parent.mkdir(parents=True, exist_ok=True)
         store = SessionMemoryStore(db_path=db_path)
-        print(f"Agent session memory store initialized with direct path: {store.db_path}")
+        print(f"Agent session memory store initialized with direct path: {store.db_path}", file=sys.stderr)
 
     elif working_dir:
         # Use working directory approach (legacy)
@@ -97,14 +103,14 @@ def initialize_store(working_dir: str = None, database_path: str = None) -> None
         db_path = Path(config.working_dir) / "memory" / "agent_session_memory.db"
         db_path.parent.mkdir(parents=True, exist_ok=True)
         store = SessionMemoryStore(db_path=db_path)
-        print(f"Agent session memory store initialized with working dir: {store.db_path}")
+        print(f"Agent session memory store initialized with working dir: {store.db_path}", file=sys.stderr)
 
     else:
         # Default behavior - use current working directory
         db_path = Path(config.working_dir) / "memory" / "agent_session_memory.db"
         db_path.parent.mkdir(parents=True, exist_ok=True)
         store = SessionMemoryStore(db_path=db_path)
-        print(f"Agent session memory store initialized (default): {store.db_path}")
+        print(f"Agent session memory store initialized (default): {store.db_path}", file=sys.stderr)
 
 # ======================
 # MAIN AGENT FUNCTIONS
@@ -120,7 +126,7 @@ def store_session_context(
     description: str = None,
     tags: list[str] = None,
     metadata: dict = None
-) -> dict[str, Any]:
+) -> StoreMemoryResult:
     """Store agent session snapshots for continuity across iterations.
 
     Args:
@@ -159,7 +165,7 @@ def store_input_prompt(
     description: str = None,
     tags: list[str] = None,
     metadata: dict = None
-) -> dict[str, Any]:
+) -> StoreMemoryResult:
     """Store original prompts to prevent loss during session.
 
     Args:
@@ -200,7 +206,7 @@ def store_system_memory(
     description: str = None,
     tags: list[str] = None,
     metadata: dict = None
-) -> dict[str, Any]:
+) -> StoreMemoryResult:
     """Store system info: script paths, endpoints, DB connections.
 
     Args:
@@ -246,7 +252,7 @@ def store_report(
     tags: list[str] = None,
     metadata: dict = None,
     auto_chunk: bool = True
-) -> dict[str, Any]:
+) -> StoreMemoryResult:
     """Store agent reports with automatic chunking for large documents.
 
     Args:
@@ -290,7 +296,7 @@ def store_knowledge_base(
     tags: list[str] = None,
     metadata: dict = None,
     auto_chunk: bool = True
-) -> dict[str, Any]:
+) -> StoreMemoryResult:
     """Store long-term reference material: documentation, guides, tutorials.
 
     Args:
@@ -334,7 +340,7 @@ def store_report_observation(
     description: str = None,
     tags: list[str] = None,
     metadata: dict = None
-) -> dict[str, Any]:
+) -> StoreMemoryResult:
     """Store additional notes and observations about existing reports.
 
     Args:
@@ -382,7 +388,7 @@ def store_working_memory(
     tags: list[str] = None,
     metadata: dict = None,
     auto_chunk: bool = True
-) -> dict[str, Any]:
+) -> StoreMemoryResult:
     """Store important insights during task execution (gotcha moments).
 
     Args:
@@ -426,7 +432,7 @@ def search_session_context(
     query: str = None,
     limit: int = 3,
     latest_first: bool = True
-) -> dict[str, Any]:
+) -> SearchMemoriesResult:
     """Search session snapshots with filtering. Returns ordered by session_iter DESC, created_at DESC.
 
     Args:
@@ -461,7 +467,7 @@ def search_system_memory(
     query: str = None,
     limit: int = 3,
     latest_first: bool = True
-) -> dict[str, Any]:
+) -> SearchMemoriesResult:
     """Search system configurations with filtering. Returns ordered by session_iter DESC, created_at DESC.
 
     Args:
@@ -498,7 +504,7 @@ def search_input_prompts(
     query: str = None,
     limit: int = 3,
     latest_first: bool = True
-) -> dict[str, Any]:
+) -> SearchMemoriesResult:
     """Search stored prompts with filtering. Returns ordered by session_iter DESC, created_at DESC.
 
     Args:
@@ -535,7 +541,7 @@ def load_session_context_for_task(
     agent_id: str,
     session_id: str,
     current_task_code: str
-) -> dict[str, Any]:
+) -> LoadSessionContextResult:
     """Load session context only if agent worked on same task before. Used for task continuity.
 
     Args:
@@ -553,7 +559,7 @@ def load_session_context_for_task(
 # ======================
 
 @mcp.tool()
-def get_memory_by_id(memory_id: int) -> dict[str, Any]:
+def get_memory_by_id(memory_id: int) -> GetMemoryResult:
     """Retrieve memory by ID with complete details.
 
     Args:
@@ -568,7 +574,7 @@ def get_memory_by_id(memory_id: int) -> dict[str, Any]:
 def get_session_stats(
     agent_id: str = None,
     session_id: str = None
-) -> dict[str, Any]:
+) -> SessionStatsResult:
     """Get memory usage statistics for sessions.
 
     Args:
@@ -584,7 +590,7 @@ def get_session_stats(
 def list_sessions(
     agent_id: str = None,
     limit: int = 20
-) -> dict[str, Any]:
+) -> ListSessionsResult:
     """List recent sessions with basic information.
 
     Args:
@@ -597,7 +603,7 @@ def list_sessions(
     return store.list_sessions(agent_id, limit)
 
 @mcp.tool()
-def delete_memory(memory_id: int) -> dict[str, Any]:
+def delete_memory(memory_id: int) -> DeleteMemoryResult:
     """Delete memory and all associated data (embeddings, chunks).
 
     Args:
@@ -612,7 +618,7 @@ def delete_memory(memory_id: int) -> dict[str, Any]:
 def cleanup_old_memories(
     older_than_days: int = 30,
     memory_type: str = None
-) -> dict[str, Any]:
+) -> CleanupMemoriesResult:
     """Delete memories older than specified days.
 
     Args:
@@ -625,7 +631,7 @@ def cleanup_old_memories(
     return store.cleanup_old_memories(older_than_days, memory_type)
 
 @mcp.tool()
-def reconstruct_document(memory_id: int) -> dict[str, Any]:
+def reconstruct_document(memory_id: int) -> ReconstructDocumentResult:
     """Reconstruct complete document from stored chunks.
 
     Args:
@@ -642,7 +648,7 @@ def write_document_to_file(
     output_path: str = None,
     include_metadata: bool = True,
     format: str = "markdown"
-) -> dict[str, Any]:
+) -> WriteDocumentResult:
     """Write reconstructed document to disk. Use for large documents (>20k tokens).
 
     Args:
@@ -671,7 +677,7 @@ def search_knowledge_base(
     limit: int = 3,
     similarity_threshold: float = 0.7,
     auto_merge_threshold: float = 0.6
-) -> dict[str, Any]:
+) -> GranularSearchResult:
     """Search knowledge base with configurable granularity.
 
     Args:
@@ -718,7 +724,7 @@ def search_reports(
     limit: int = 3,
     similarity_threshold: float = 0.7,
     auto_merge_threshold: float = 0.6
-) -> dict[str, Any]:
+) -> GranularSearchResult:
     """Search agent reports with configurable granularity.
 
     Args:
@@ -765,7 +771,7 @@ def search_working_memory(
     limit: int = 3,
     similarity_threshold: float = 0.7,
     auto_merge_threshold: float = 0.6
-) -> dict[str, Any]:
+) -> GranularSearchResult:
     """Search working memory (insights, gotcha moments) with configurable granularity.
 
     Args:
@@ -806,7 +812,7 @@ def expand_chunk_context(
     memory_id: int,
     chunk_index: int,
     context_window: int = 2
-) -> dict[str, Any]:
+) -> ExpandChunkContextResult:
     """Retrieve chunk with surrounding siblings. Universal tool for any granularity level.
 
     Args:
@@ -826,9 +832,9 @@ def expand_chunk_context(
 if __name__ == "__main__":
     import argparse
 
-    print("🤖 AGENT SESSION MEMORY MCP SERVER STARTING")
-    print(f"📁 File: {__file__}")
-    print("🎯 Specialized for agent session management with proper scoping")
+    print("🤖 AGENT SESSION MEMORY MCP SERVER STARTING", file=sys.stderr)
+    print(f"📁 File: {__file__}", file=sys.stderr)
+    print("🎯 Specialized for agent session management with proper scoping", file=sys.stderr)
 
     parser = argparse.ArgumentParser(description="Agent Session Memory MCP Server")
     parser.add_argument("--working-dir", help="Working directory for memory files (legacy)")

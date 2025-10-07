@@ -144,21 +144,10 @@ class SessionMemoryStore:
         """
         conn = sqlite3.connect(self.db_path)
 
-        # STEP 1: Enable WAL mode for better concurrency
-        # WAL allows readers to read while writer writes (no blocking)
-        conn.execute("PRAGMA journal_mode=WAL")
-
-        # STEP 2: Set synchronous to NORMAL (balance of safety and speed)
-        conn.execute("PRAGMA synchronous=NORMAL")
-
-        # STEP 3: Increase cache size to 64MB for performance
-        conn.execute("PRAGMA cache_size=-64000")
-
-        # STEP 4: Enable foreign keys for referential integrity
-        conn.execute("PRAGMA foreign_keys=ON")
-
-        # STEP 5: Set busy timeout to handle concurrent access
-        conn.execute("PRAGMA busy_timeout=5000")
+        # CRITICAL FIX: Set busy timeout to handle concurrent access
+        # Without this, any lock contention causes immediate "database is locked" error
+        # With 5000ms timeout, SQLite waits for locks instead of failing
+        conn.execute("PRAGMA busy_timeout = 5000")
 
         # Load sqlite-vec extension
         try:
@@ -213,14 +202,6 @@ class SessionMemoryStore:
             logger.warning(f"Exception loading vec0 extension: {e}")
 
         return conn
-
-    def __enter__(self):
-        """Context manager entry - no-op, connections managed per operation"""
-        return self
-
-    def __exit__(self, exc_type, exc_val, exc_tb):
-        """Context manager exit - no-op, connections managed per operation"""
-        return False
 
 
     def _migrate_schema(self, conn: sqlite3.Connection) -> int:
@@ -325,20 +306,20 @@ class SessionMemoryStore:
 
             # If no migrations needed, return early
             if not migrations_to_apply:
-                logger.info("Database schema is up-to-date (no migrations needed)")
+                print("✅ Database schema is up-to-date (no migrations needed)")
                 return 0
 
             # Apply migrations
-            logger.info(f"Applying {len(migrations_to_apply)} schema migration(s)...")
+            print(f"🔄 Applying {len(migrations_to_apply)} schema migration(s)...")
 
             for migration in migrations_to_apply:
                 try:
                     conn.execute(migration['statement'])
-                    logger.info(f"Added column: {migration['column']} ({migration['type']}, default={migration['default']})") 
+                    print(f"  ✅ Added column: {migration['column']} ({migration['type']}, default={migration['default']})")
                 except sqlite3.Error as e:
                     # If column already exists (race condition), continue
                     if "duplicate column" in str(e).lower():
-                        logger.warning(f"Column {migration['column']} already exists, skipping")
+                        print(f"  ⚠️  Column {migration['column']} already exists, skipping")
                         continue
                     else:
                         # Re-raise other errors
@@ -358,13 +339,13 @@ class SessionMemoryStore:
                     f"Migration incomplete: columns still missing after migration: {missing_after_migration}"
                 )
 
-            logger.info(f"Successfully applied {len(migrations_to_apply)} schema migration(s)")
-            logger.info(f"Database schema updated from {len(existing_columns)} to {len(updated_columns)} columns")
+            print(f"✅ Successfully applied {len(migrations_to_apply)} schema migration(s)")
+            print(f"   Database schema updated from {len(existing_columns)} to {len(updated_columns)} columns")
 
             return len(migrations_to_apply)
 
         except sqlite3.Error as e:
-            logger.error(f"Schema migration failed: {e}")
+            print(f"❌ Schema migration failed: {e}")
             conn.rollback()
             raise
 
@@ -434,11 +415,11 @@ class SessionMemoryStore:
         try:
             migrations_applied = self._migrate_schema(conn)
             if migrations_applied > 0:
-                logger.info(f"Database migration completed: {migrations_applied} column(s) added")
+                print(f"📋 Database migration completed: {migrations_applied} column(s) added")
         except sqlite3.Error as e:
-            logger.warning(f"Schema migration failed: {e}")
-            logger.warning("This may cause issues with existing databases.")
-            logger.warning("Please check database integrity and consider manual migration.")
+            print(f"⚠️  Warning: Schema migration failed: {e}")
+            print(f"   This may cause issues with existing databases.")
+            print(f"   Please check database integrity and consider manual migration.")
             # Don't raise - allow server to continue (may fail later if schema incompatible)
         # ========================================
 
