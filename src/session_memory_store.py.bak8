@@ -496,15 +496,15 @@ class SessionMemoryStore:
                     "session_iter": row[4],
                     "task_code": row[5],
                     "content": row[6],
-                    "title": row[8],
-                    "description": row[9],
-                    "tags": json.loads(row[10]) if row[10] else [],
-                    "metadata": json.loads(row[11]) if row[11] else {},
-                    "content_hash": row[12],
-                    "created_at": row[14],
-                    "updated_at": row[15],
-                    "accessed_at": row[16],
-                    "access_count": row[17],
+                    "title": row[7],
+                    "description": row[8],
+                    "tags": json.loads(row[9]) if row[9] else [],
+                    "metadata": json.loads(row[10]) if row[10] else {},
+                    "content_hash": row[11],
+                    "created_at": row[12],
+                    "updated_at": row[13],
+                    "accessed_at": row[14],
+                    "access_count": row[15],
                     "similarity": 2.0,  # Perfect match for filtered results
                     "source_type": "scoped"
                 })
@@ -724,11 +724,11 @@ class SessionMemoryStore:
                     "session_iter": row[4],
                     "task_code": row[5],
                     "content": row[6],
-                    "title": row[8],
-                    "description": row[9],
-                    "tags": json.loads(row[10]) if row[10] else [],
-                    "metadata": json.loads(row[11]) if row[11] else {},
-                    "created_at": row[14]
+                    "title": row[7],
+                    "description": row[8],
+                    "tags": json.loads(row[9]) if row[9] else [],
+                    "metadata": json.loads(row[10]) if row[10] else {},
+                    "created_at": row[12]
                 }
 
                 return {
@@ -778,15 +778,15 @@ class SessionMemoryStore:
                 "session_iter": row[4],
                 "task_code": row[5],
                 "content": row[6],
-                "title": row[8],
-                "description": row[9],
-                "tags": json.loads(row[10]) if row[10] else [],
-                "metadata": json.loads(row[11]) if row[11] else {},
-                "content_hash": row[12],
-                "created_at": row[14],
-                "updated_at": row[15],
-                "accessed_at": row[16],
-                "access_count": row[17]
+                "title": row[7],
+                "description": row[8],
+                "tags": json.loads(row[9]) if row[9] else [],
+                "metadata": json.loads(row[10]) if row[10] else {},
+                "content_hash": row[11],
+                "created_at": row[12],
+                "updated_at": row[13],
+                "accessed_at": row[14],
+                "access_count": row[15]
             }
 
             return {
@@ -863,7 +863,7 @@ class SessionMemoryStore:
                 "unique_tasks": stats_row[4],
                 "max_session_iter": stats_row[5] or 0,
                 "avg_content_length": round(stats_row[6] or 0, 2),
-                "total_access_count": stats_row[8] or 0,
+                "total_access_count": stats_row[7] or 0,
                 "memory_type_breakdown": {row[0]: row[1] for row in type_rows},
                 "filters": {
                     "agent_id": agent_id,

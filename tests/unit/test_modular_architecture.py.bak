@@ -87,11 +87,8 @@ def test_no_circular_imports():
 @pytest.mark.unit
 def test_modules_share_connection(store):
     """Verify all operation modules share the same database connection."""
-    # All modules should reference the parent store's _get_connection method
-    assert store.storage.store == store
-    assert store.search.store == store
-    assert store.maintenance.store == store
-    assert store.chunking.store == store
-    # Verify parent store has _get_connection
-    assert hasattr(store, '_get_connection')
-    assert callable(store._get_connection)
+    # All modules should use the same _get_connection method
+    assert store.storage._get_connection == store._get_connection
+    assert store.search._get_connection == store._get_connection
+    assert store.maintenance._get_connection == store._get_connection
+    assert store.chunking._get_connection == store._get_connection
