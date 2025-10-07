@@ -105,41 +105,6 @@ class SessionMemoryStore:
         run_migrations(self.db_path)
 
 
-    @property
-    def token_encoder(self):
-        """Cached token encoder instance."""
-        if not hasattr(self, '_token_encoder'):
-            if TIKTOKEN_AVAILABLE:
-                try:
-                    self._token_encoder = tiktoken.get_encoding("cl100k_base")
-                except Exception:
-                    self._token_encoder = None
-            else:
-                self._token_encoder = None
-        return self._token_encoder
-
-    def _estimate_tokens(self, text: str) -> int:
-        """
-        Estimate token count for text using cached tokenizer.
-        Falls back to character-based estimation if tokenizer unavailable.
-        """
-        if self.token_encoder:
-            try:
-                return len(self.token_encoder.encode(text))
-            except Exception:
-                pass
-
-        # Fallback: ~4 characters per token
-        return len(text) // 4
-
-    def _format_bytes_human_readable(self, size_bytes: int) -> str:
-        """Format file size in human-readable format."""
-        for unit in ['B', 'KB', 'MB', 'GB']:
-            if size_bytes < 1024.0:
-                return f"{size_bytes:.1f} {unit}"
-            size_bytes /= 1024.0
-        return f"{size_bytes:.1f} TB"
-
     def _get_connection(self) -> sqlite3.Connection:
         """
         Get database connection with WAL mode, optimizations, and sqlite-vec loaded.
