@@ -14,7 +14,7 @@ import hashlib
 import logging
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Dict, Any, List, Optional
+from typing import Any
 import tempfile
 
 # Initialize logger

@@ -14,7 +14,7 @@ import hashlib
 import logging
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Dict, Any, List, Optional
+from typing import Any
 import tempfile
 
 # Initialize logger
@@ -74,14 +74,14 @@ class SessionMemoryStore:
         self._embedding_model = None
 
     @property
-    def chunker(self):
+    def chunker(self) -> 'DocumentChunker':
         """Lazy initialization of chunker"""
         if self._chunker is None:
             self._chunker = DocumentChunker()
         return self._chunker
 
     @property
-    def token_encoder(self):
+    def token_encoder(self) -> Any:
         """Cached token encoder instance"""
         if not hasattr(self, '_token_encoder'):
             if TIKTOKEN_AVAILABLE:
@@ -94,7 +94,7 @@ class SessionMemoryStore:
         return self._token_encoder
 
     @property
-    def embedding_model(self):
+    def embedding_model(self) -> Any:
         """Lazy-load embedding model for semantic search."""
         if self._embedding_model is None:
             try:
@@ -214,11 +214,11 @@ class SessionMemoryStore:
 
         return conn
 
-    def __enter__(self):
+    def __enter__(self) -> 'SessionMemoryStore':
         """Context manager entry - no-op, connections managed per operation"""
         return self
 
-    def __exit__(self, exc_type, exc_val, exc_tb):
+    def __exit__(self, exc_type, exc_val, exc_tb) -> bool:
         """Context manager exit - no-op, connections managed per operation"""
         return False
 
@@ -368,7 +368,7 @@ class SessionMemoryStore:
             conn.rollback()
             raise
 
-    def _init_schema(self):
+    def _init_schema(self) -> None:
         """Initialize database schema"""
         conn = self._get_connection()
 
@@ -490,11 +490,11 @@ class SessionMemoryStore:
         task_code: str = None,
         title: str = None,
         description: str = None,
-        tags: List[str] = None,
-        metadata: Dict[str, Any] = None,
+        tags: list[str] = None,
+        metadata: dict[str, Any] = None,
         auto_chunk: bool = None,
-        embedding: List[float] = None
-    ) -> Dict[str, Any]:
+        embedding: list[float] = None
+    ) -> dict[str, Any]:
         """
         Store a memory entry with optional chunking and embedding.
 
@@ -658,7 +658,7 @@ class SessionMemoryStore:
         query: str = None,
         limit: int = 3,
         latest_first: bool = True
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         """
         Search memories with optional filters.
 
@@ -783,7 +783,7 @@ class SessionMemoryStore:
         limit: int = 3,
         similarity_threshold: float = 0.7,
         auto_merge_threshold: float = 0.6
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         """
         Search with specific granularity level.
 
@@ -847,7 +847,7 @@ class SessionMemoryStore:
         memory_id: int,
         chunk_index: int,
         context_window: int = 2
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         """
         Expand chunk context by retrieving surrounding chunks.
 
@@ -925,7 +925,7 @@ class SessionMemoryStore:
         agent_id: str,
         session_id: str,
         current_task_code: str
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         """
         Load session context only if agent previously worked on the same task_code.
 
@@ -991,7 +991,7 @@ class SessionMemoryStore:
                 "message": str(e)
             }
 
-    def get_memory(self, memory_id: int) -> Dict[str, Any]:
+    def get_memory(self, memory_id: int) -> dict[str, Any]:
         """Retrieve specific memory by ID."""
         try:
             conn = self._get_connection()
@@ -1044,7 +1044,7 @@ class SessionMemoryStore:
         self,
         agent_id: str = None,
         session_id: str = None
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         """Get statistics about session memory usage."""
         try:
             conn = self._get_connection()
@@ -1121,7 +1121,7 @@ class SessionMemoryStore:
         self,
         agent_id: str = None,
         limit: int = 20
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         """List recent sessions with basic info."""
         try:
             conn = self._get_connection()
@@ -1175,7 +1175,7 @@ class SessionMemoryStore:
                 "message": str(e)
             }
 
-    def reconstruct_document(self, memory_id: int) -> Dict[str, Any]:
+    def reconstruct_document(self, memory_id: int) -> dict[str, Any]:
         """
         Reconstruct a document from its chunks.
 
@@ -1260,7 +1260,7 @@ class SessionMemoryStore:
         output_path: str = None,
         include_metadata: bool = True,
         format: str = "markdown"
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         """
         Write a reconstructed document from memory to disk as a markdown file.
 
@@ -1446,7 +1446,7 @@ class SessionMemoryStore:
                 "memory_id": memory_id
             }
 
-    def delete_memory(self, memory_id: int) -> Dict[str, Any]:
+    def delete_memory(self, memory_id: int) -> dict[str, Any]:
         """
         Delete a memory and all associated data.
 

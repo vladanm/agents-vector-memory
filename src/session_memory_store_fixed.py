@@ -12,7 +12,7 @@ import json
 import re
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import List, Optional, Dict, Any, Tuple
+from typing import Any
 
 # DEBUG: Log module load
 with open("/tmp/vector_memory_debug.log", "a") as f:
@@ -178,7 +178,7 @@ class SessionMemoryStore:
         finally:
             conn.close()
 
-    def _extract_yaml_frontmatter(self, content: str) -> Tuple[str, Dict[str, Any]]:
+    def _extract_yaml_frontmatter(self, content: str) -> tuple[str, dict[str, Any]]:
         """
         Extract YAML frontmatter from markdown content.
 
@@ -223,7 +223,7 @@ class SessionMemoryStore:
         return content
 
 
-    def _extract_keywords(self, content: str, max_keywords: int = 10) -> List[str]:
+    def _extract_keywords(self, content: str, max_keywords: int = 10) -> list[str]:
         """
         Extract keywords from content using simple frequency analysis.
 
@@ -374,7 +374,7 @@ class SessionMemoryStore:
         words = len(text.split())
         return int(words * 1.3)
 
-    def _calculate_chunk_metadata(self, chunk, chunks: List, parent_title: str) -> Dict[str, Any]:
+    def _calculate_chunk_metadata(self, chunk, chunks: List, parent_title: str) -> dict[str, Any]:
         """
         Calculate all metadata fields for a chunk.
 
@@ -496,10 +496,10 @@ class SessionMemoryStore:
         task_code: str = None,
         title: str = None,
         description: str = None,
-        tags: List[str] = None,
-        metadata: Dict[str, Any] = None,
+        tags: list[str] = None,
+        metadata: dict[str, Any] = None,
         auto_chunk: bool = False
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         """
         Store memory with session scoping and optional document chunking.
 
@@ -699,7 +699,7 @@ class SessionMemoryStore:
         limit: int = 10,
         latest_first: bool = True,
         similarity_threshold: float = 0.7
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         """
         Search memories with proper scoping and ordering.
         
@@ -920,7 +920,7 @@ class SessionMemoryStore:
         limit: int = 10,
         similarity_threshold: float = 0.7,
         auto_merge_threshold: float = 0.6
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         """
         Three-tier granularity search for knowledge_base and reports.
 
@@ -1130,11 +1130,11 @@ class SessionMemoryStore:
 
     def _expand_to_sections(
         self,
-        matched_chunks: List[Dict],
+        matched_chunks: list[Dict],
         merge_threshold: float,
         conn: sqlite3.Connection,
         limit: int
-    ) -> List[Dict]:
+    ) -> list[Dict]:
         """
         Expand matched chunks to include their siblings (section-level context).
 
@@ -1221,10 +1221,10 @@ class SessionMemoryStore:
 
     def _auto_merge_medium_chunks(
         self,
-        results: List[Dict],
+        results: list[Dict],
         merge_threshold: float,
         conn: sqlite3.Connection
-    ) -> List[Dict]:
+    ) -> list[Dict]:
         """
         Auto-merge medium chunks if ≥60% of siblings match.
 
@@ -1310,7 +1310,7 @@ class SessionMemoryStore:
         memory_id: int,
         chunk_index: int,
         context_window: int = 2
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         """
         Expand chunk context by retrieving surrounding sibling chunks.
 
@@ -1421,7 +1421,7 @@ class SessionMemoryStore:
         agent_id: str,
         session_id: str, 
         current_task_code: str
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         """
         Load session context only if agent previously worked on the same task_code.
         
@@ -1487,7 +1487,7 @@ class SessionMemoryStore:
                 "message": str(e)
             }
     
-    def get_memory(self, memory_id: int) -> Dict[str, Any]:
+    def get_memory(self, memory_id: int) -> dict[str, Any]:
         """Retrieve specific memory by ID."""
         try:
             conn = self._get_connection()
@@ -1540,7 +1540,7 @@ class SessionMemoryStore:
         self,
         agent_id: str = None,
         session_id: str = None
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         """Get statistics about session memory usage."""
         try:
             conn = self._get_connection()
@@ -1617,7 +1617,7 @@ class SessionMemoryStore:
         self,
         agent_id: str = None,
         limit: int = 20
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         """List recent sessions with basic info."""
         try:
             conn = self._get_connection()
@@ -1671,7 +1671,7 @@ class SessionMemoryStore:
                 "message": str(e)
             }
 
-    def reconstruct_document(self, memory_id: int) -> Dict[str, Any]:
+    def reconstruct_document(self, memory_id: int) -> dict[str, Any]:
         """
         Reconstruct a document from its chunks.
 
@@ -1745,7 +1745,7 @@ class SessionMemoryStore:
                 "message": str(e)
             }
 
-    def delete_memory(self, memory_id: int) -> Dict[str, Any]:
+    def delete_memory(self, memory_id: int) -> dict[str, Any]:
         """
         Delete a memory and all associated data.
 
@@ -1802,7 +1802,7 @@ class SessionMemoryStore:
                 "message": str(e)
             }
 
-    def cleanup_old_memories(self, older_than_days: int = 30, memory_type: str = None) -> Dict[str, Any]:
+    def cleanup_old_memories(self, older_than_days: int = 30, memory_type: str = None) -> dict[str, Any]:
         """
         Clean up old memories older than specified days.
 

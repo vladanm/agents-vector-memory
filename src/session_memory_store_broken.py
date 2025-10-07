@@ -13,7 +13,7 @@ import sqlite3
 import hashlib
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Dict, Any, List, Optional
+from typing import Any
 import tempfile
 
 try:

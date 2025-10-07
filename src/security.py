@@ -10,7 +10,6 @@ import re
 import os
 import hashlib
 from pathlib import Path
-from typing import List
 
 from .config import Config
 
@@ -226,7 +225,7 @@ def validate_session_iter(session_iter: int) -> int:
     return session_iter
 
 
-def validate_tags(tags: List[str]) -> List[str]:
+def validate_tags(tags: list[str]) -> list[str]:
     """
     Validate list of tags.
     
@@ -234,7 +233,7 @@ def validate_tags(tags: List[str]) -> List[str]:
         tags: List of tags to validate
         
     Returns:
-        List[str]: Validated tags
+        list[str]: Validated tags
         
     Raises:
         SecurityError: If tags are invalid

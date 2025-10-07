@@ -7,7 +7,7 @@ Hierarchical text chunking using LangChain's MarkdownTextSplitter.
 
 import re
 import hashlib
-from typing import List, Dict, Any, Optional
+from typing import Any
 from dataclasses import dataclass
 from .memory_types import ChunkEntry, ContentFormat, get_memory_type_config
 
@@ -82,7 +82,7 @@ class DocumentChunker:
         if hasattr(self, '_active_chunks'):
             self._active_chunks.clear()
 
-    def chunk_document(self, content: str, parent_id: int, metadata: Dict[str, Any] = None) -> List[ChunkEntry]:
+    def chunk_document(self, content: str, parent_id: int, metadata: dict[str, Any] = None) -> list[ChunkEntry]:
         """
         Chunk a document into coherent pieces using LangChain splitters.
 
@@ -152,7 +152,7 @@ class DocumentChunker:
         else:
             return ContentFormat.TEXT.value
 
-    def _chunk_with_langchain(self, content: str, parent_id: int, chunk_size: int, chunk_overlap: int) -> List[ChunkEntry]:
+    def _chunk_with_langchain(self, content: str, parent_id: int, chunk_size: int, chunk_overlap: int) -> list[ChunkEntry]:
         """
         Chunk markdown using 2-stage approach:
         Stage 1: ExperimentalMarkdownSyntaxTextSplitter (code-aware, preserves indentation)
@@ -306,7 +306,7 @@ class DocumentChunker:
 
         return splits
 
-    def _apply_contextual_enrichment(self, chunks: List[ChunkEntry], document_title: str, memory_type: str):
+    def _apply_contextual_enrichment(self, chunks: list[ChunkEntry], document_title: str, memory_type: str):
         """
         Apply contextual enrichment to all chunks in place.
 
@@ -389,8 +389,8 @@ class DocumentChunker:
 
         return enriched_content, chunk_content
 
-    def _enhance_code_metadata(self, content: str, base_metadata: Dict[str, Any],
-                               token_count: int, chunk_size: int) -> Dict[str, Any]:
+    def _enhance_code_metadata(self, content: str, base_metadata: dict[str, Any],
+                               token_count: int, chunk_size: int) -> dict[str, Any]:
         """
         Add code-specific metadata for enhanced retrieval.
 
@@ -431,7 +431,7 @@ class DocumentChunker:
 
         return metadata
 
-    def _chunk_markdown_hierarchical(self, content: str, parent_id: int, chunk_size: int, chunk_overlap: int) -> List[ChunkEntry]:
+    def _chunk_markdown_hierarchical(self, content: str, parent_id: int, chunk_size: int, chunk_overlap: int) -> list[ChunkEntry]:
         """Chunk markdown preserving header hierarchy (legacy fallback method)"""
         chunks = []
         sections = self._split_by_headers(content)
@@ -449,7 +449,7 @@ class DocumentChunker:
         self._link_chunks(chunks)
         return chunks
 
-    def _split_by_headers(self, content: str) -> List[Dict[str, Any]]:
+    def _split_by_headers(self, content: str) -> list[dict[str, Any]]:
         """Split content by markdown headers"""
         sections = []
         lines = content.split('\n')
@@ -493,7 +493,7 @@ class DocumentChunker:
 
         return sections
 
-    def _process_section(self, section: Dict[str, Any], parent_id: int, start_index: int, chunk_size: int, chunk_overlap: int) -> List[ChunkEntry]:
+    def _process_section(self, section: dict[str, Any], parent_id: int, start_index: int, chunk_size: int, chunk_overlap: int) -> list[ChunkEntry]:
         """Process a section, splitting if needed"""
         content = section['content']
         token_count = self._count_tokens(content)
@@ -512,7 +512,7 @@ class DocumentChunker:
         else:
             return self._split_large_section(section, parent_id, start_index, chunk_size, chunk_overlap)
 
-    def _split_large_section(self, section: Dict[str, Any], parent_id: int, start_index: int, chunk_size: int, chunk_overlap: int) -> List[ChunkEntry]:
+    def _split_large_section(self, section: dict[str, Any], parent_id: int, start_index: int, chunk_size: int, chunk_overlap: int) -> list[ChunkEntry]:
         """Split large section into smaller chunks"""
         content = section['content']
         chunks = []
@@ -567,7 +567,7 @@ class DocumentChunker:
 
         return chunks
 
-    def _chunk_recursive(self, content: str, parent_id: int, chunk_size: int, chunk_overlap: int) -> List[ChunkEntry]:
+    def _chunk_recursive(self, content: str, parent_id: int, chunk_size: int, chunk_overlap: int) -> list[ChunkEntry]:
         """Recursive chunking for non-structured content"""
         chunks = []
         sentences = re.split(r'[.!?]+\s+', content)
@@ -643,7 +643,7 @@ class DocumentChunker:
             else:
                 return content
 
-    def _link_chunks(self, chunks: List[ChunkEntry]) -> None:
+    def _link_chunks(self, chunks: list[ChunkEntry]) -> None:
         """Link chunks with prev/next references"""
         for i, chunk in enumerate(chunks):
             if i > 0:
@@ -655,7 +655,7 @@ class DocumentChunker:
         """Generate SHA256 hash for content"""
         return hashlib.sha256(content.encode('utf-8')).hexdigest()[:16]
 
-    def reconstruct_document(self, chunks: List[ChunkEntry]) -> str:
+    def reconstruct_document(self, chunks: list[ChunkEntry]) -> str:
         """Reconstruct document from chunks"""
         if not chunks:
             return ""

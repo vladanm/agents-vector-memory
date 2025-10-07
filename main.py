@@ -44,7 +44,7 @@ Legacy mode: Memory files stored in {working_dir}/memory/agent_session_memory.db
 
 import sys
 from pathlib import Path
-from typing import Dict, Any, List, Optional, Literal
+from typing import Any, Literal
 
 # Add src to path for imports
 sys.path.insert(0, str(Path(__file__).parent / "src"))

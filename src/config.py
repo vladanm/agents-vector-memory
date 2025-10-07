@@ -7,7 +7,6 @@ Centralized configuration management for the session-based memory system.
 
 import os
 from pathlib import Path
-from typing import List
 
 
 class Config:
