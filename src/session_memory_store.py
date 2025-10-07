@@ -93,6 +93,12 @@ class SessionMemoryStore:
         self.maintenance = MaintenanceOperations(self)
         self.chunking = ChunkingStorageOperations(self)
 
+    def _init_schema(self):
+        """Initialize database schema using migrations."""
+        from .db_migrations import run_migrations
+        run_migrations(self.db_path)
+
+
     @property
     def chunker(self) -> 'DocumentChunker':
         """Lazy initialization of chunker"""

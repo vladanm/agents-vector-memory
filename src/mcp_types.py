@@ -6,7 +6,7 @@ TypedDict definitions for all MCP tool return values to enable structured output
 These types ensure consistent, machine-readable responses across all 25 tools.
 """
 
-from typing import TypedDict, Any
+from typing import TypedDict, Any, Optional
 
 
 # ======================
