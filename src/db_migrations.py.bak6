@@ -18,7 +18,8 @@ def run_migrations(db_path: str) -> None:
     try:
         # Enable extension loading (required for sqlite-vec)
         conn.enable_load_extension(True)
-        
+
+    try:
         # Load sqlite-vec extension for vector search
         try:
             import sqlite_vec
@@ -27,9 +28,6 @@ def run_migrations(db_path: str) -> None:
             # If sqlite_vec not available, continue without it
             # Vector search features will not work but basic functionality will
             pass
-        
-        # Disable extension loading for security
-        conn.enable_load_extension(False)
 
         # Enable WAL mode FIRST (before creating tables) for better concurrency
         conn.execute("PRAGMA journal_mode=WAL")

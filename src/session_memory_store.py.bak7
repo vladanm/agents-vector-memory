@@ -127,10 +127,8 @@ class SessionMemoryStore:
         # Load sqlite-vec extension if available
         if SQLITE_VEC_AVAILABLE:
             try:
-                conn.enable_load_extension(True)
                 import sqlite_vec
                 sqlite_vec.load(conn)
-                conn.enable_load_extension(False)
             except Exception:
                 pass  # Continue without vector search if it fails
 
