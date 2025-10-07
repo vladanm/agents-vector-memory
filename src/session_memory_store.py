@@ -40,6 +40,12 @@ from .storage import StorageOperations
 from .search import SearchOperations
 from .maintenance import MaintenanceOperations
 from .chunking_storage import ChunkingStorageOperations
+from .exceptions import (
+    VectorMemoryException, ValidationError, MemoryError,
+    SearchError, ChunkingError, DatabaseError, DatabaseLockError
+)
+from .retry_utils import exponential_backoff, retry_on_lock
+
 
 
 # Valid memory types

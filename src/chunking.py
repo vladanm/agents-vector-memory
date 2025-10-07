@@ -270,7 +270,7 @@ class DocumentChunker:
 
         return chunks
 
-    def _validate_code_integrity(self, splits: List) -> List:
+    def _validate_code_integrity(self, splits: list) -> list:
         """
         Ensure code blocks remain intact.
 
