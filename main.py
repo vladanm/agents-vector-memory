@@ -245,7 +245,7 @@ def store_report(
     """
     result = store.store_memory(
         agent_id=agent_id,
-        memory_type="report",
+        memory_type="reports",
         content=content,
         session_id=session_id,
         session_iter=session_iter,
@@ -269,7 +269,7 @@ def store_report_observation(
     """
     result = store.store_memory(
         agent_id=agent_id,
-        memory_type="report_observation",
+        memory_type="report_observations",
         content=content,
         session_id=session_id,
         session_iter=session_iter,
