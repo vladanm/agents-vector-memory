@@ -1,0 +1,62 @@
+--- main.py.before-bug3-bug4-fix	2025-01-09 00:00:00.000000000 +0000
++++ main.py	2025-01-09 00:00:00.000000000 +0000
+@@ -99,6 +99,41 @@
+     WriteDocumentResult, DeleteMemoryResult, CleanupMemoriesResult
+ )
+
++# ======================
++# BUG #3 & #4 FIX: PYDANTIC TYPE TRANSFORMATION
++# ======================
++
++import hashlib
++
++def _transform_search_result_to_mcp(db_result: dict) -> dict:
++    """
++    Transform DB search result to match SearchMemoriesResult schema (Bug #3 & #4 fix).
++
++    Converts:
++    - memory_id (TEXT) -> id (int) via hash
++    - session_iter (TEXT like "v1") -> session_iter (int like 1)
++    """
++    memory_id_str = db_result.get("id") or db_result.get("memory_id", "unknown")
++    id_hash = hashlib.sha256(str(memory_id_str).encode()).digest()[:8]
++    id_int = int.from_bytes(id_hash, byteorder='big', signed=False)
++
++    session_iter_str = db_result.get("session_iter", "v1")
++    try:
++        session_iter_int = int(session_iter_str[1:]) if session_iter_str.startswith("v") else int(session_iter_str)
++    except (ValueError, IndexError):
++        session_iter_int = 1
++
++    return {**db_result, "id": id_int, "session_iter": session_iter_int}
++
++def _transform_search_memories_result(raw_result: dict) -> dict:
++    """Transform complete SearchMemoriesResult (Bug #3 & #4 fix)."""
++    return {
++        **raw_result,
++        "results": [_transform_search_result_to_mcp(r) for r in raw_result.get("results", [])]
++    }
++
++# ======================
++
+ # Initialize global objects
+ config = Config()
+ mcp = FastMCP("Agent Session Memory")
+@@ -361,7 +396,7 @@
+         session_iter=session_iter,
+         limit=limit
+     )
+-    return result
++    return _transform_search_memories_result(result)
+
+
+ @mcp.tool()
+@@ -383,7 +418,7 @@
+         task_code=task_code,
+         limit=limit
+     )
+-    return result
++    return _transform_search_memories_result(result)
+
+
+ @mcp.tool()

@@ -554,6 +554,10 @@ class SessionMemoryStore:
         """Get memory by ID."""
         return self.storage.get_memory(*args, **kwargs)
 
+    def get_memory_by_id(self, *args, **kwargs) -> dict[str, Any]:
+        """Get memory by ID (alias for get_memory)."""
+        return self.storage.get_memory(*args, **kwargs)
+
     def delete_memory(self, *args, **kwargs) -> dict[str, Any]:
         """Delete memory."""
         return self.storage.delete_memory(*args, **kwargs)
