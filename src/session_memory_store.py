@@ -590,6 +590,10 @@ class SessionMemoryStore:
         """Load all relevant session context for continuation."""
         return self._load_session_context_impl(session_id, session_iter)
 
+    def cleanup_old_memories(self, *args, **kwargs) -> dict[str, Any]:
+        """Cleanup old memories."""
+        return self.maintenance.cleanup_old_memories(*args, **kwargs)
+
     # ======================
     # CORE IMPLEMENTATION METHODS
     # ======================
@@ -2144,4 +2148,75 @@ class SessionMemoryStore:
                 "context": None,
                 "message": str(e),
                 "error": "Failed to load session context"
+            }
+
+    def _cleanup_old_memories_impl(self, days_old: int, dry_run: bool) -> dict[str, Any]:
+        """
+        Cleanup memories older than specified days.
+
+        Args:
+            days_old: Delete memories older than this many days
+            dry_run: If True, only count what would be deleted (don't actually delete)
+
+        Returns:
+            Dict with cleanup statistics
+        """
+        try:
+            from datetime import datetime, timedelta, timezone
+
+            conn = self._get_connection()
+
+            # Calculate cutoff date
+            cutoff_date = (datetime.now(timezone.utc) - timedelta(days=days_old)).isoformat()
+
+            # Find memories to delete
+            to_delete = conn.execute("""
+                SELECT id, created_at
+                FROM session_memories
+                WHERE created_at < ?
+                ORDER BY created_at ASC
+            """, (cutoff_date,)).fetchall()
+
+            if not to_delete:
+                conn.close()
+                return {
+                    "success": True,
+                    "deleted_count": 0,
+                    "oldest_deleted": None,
+                    "newest_deleted": None,
+                    "message": f"No memories found older than {days_old} days",
+                    "error": None
+                }
+
+            oldest_deleted = to_delete[0][1]
+            newest_deleted = to_delete[-1][1]
+            count = len(to_delete)
+
+            if not dry_run:
+                # Actually delete
+                for row in to_delete:
+                    conn.execute("DELETE FROM session_memories WHERE id = ?", (row[0],))
+                conn.commit()
+
+            conn.close()
+
+            action = "Would delete" if dry_run else "Deleted"
+            return {
+                "success": True,
+                "deleted_count": count,
+                "oldest_deleted": oldest_deleted,
+                "newest_deleted": newest_deleted,
+                "message": f"{action} {count} memories older than {days_old} days",
+                "error": None
+            }
+
+        except Exception as e:
+            logger.error(f"Failed to cleanup old memories: {e}", exc_info=True)
+            return {
+                "success": False,
+                "deleted_count": None,
+                "oldest_deleted": None,
+                "newest_deleted": None,
+                "message": str(e),
+                "error": "Cleanup failed"
             }

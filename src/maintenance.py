@@ -37,17 +37,10 @@ class MaintenanceOperations:
     def cleanup_old_memories(
         self,
         days_old: int = 90,
-        memory_type: str | None = None
+        dry_run: bool = True
     ) -> dict[str, Any]:
-        """Cleanup old memories (placeholder for future implementation)."""
-        return {
-            "success": False,
-            "deleted_count": None,
-            "oldest_deleted": None,
-            "newest_deleted": None,
-            "error": "Not implemented",
-            "message": "Cleanup functionality not yet implemented"
-        }
+        """Cleanup old memories older than specified days."""
+        return self.store._cleanup_old_memories_impl(days_old, dry_run)
 
     def vacuum_database(self) -> dict[str, Any]:
         """
