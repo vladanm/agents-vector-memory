@@ -1930,6 +1930,16 @@ class SessionMemoryStore:
             # Build memory type breakdown dict
             memory_type_breakdown = {row[0]: row[1] for row in breakdown_rows}
 
+            # Convert max_session_iter from "v1" string to 1 integer if needed
+            max_session_iter_val = stats[4]
+            if isinstance(max_session_iter_val, str) and max_session_iter_val and max_session_iter_val.startswith('v'):
+                try:
+                    max_session_iter_val = int(max_session_iter_val[1:])
+                except (ValueError, IndexError):
+                    max_session_iter_val = 1  # Default fallback
+            elif max_session_iter_val is None:
+                max_session_iter_val = 1
+
             return {
                 "success": True,
                 "total_memories": stats[0],
@@ -1937,7 +1947,7 @@ class SessionMemoryStore:
                 "unique_agents": stats[2],
                 "unique_sessions": 1 if session_id else stats[0],
                 "unique_tasks": stats[3],
-                "max_session_iter": stats[4],
+                "max_session_iter": max_session_iter_val,
                 "avg_content_length": round(stats[5], 2) if stats[5] else 0.0,
                 "total_access_count": stats[6] or 0,
                 "memory_type_breakdown": memory_type_breakdown,
