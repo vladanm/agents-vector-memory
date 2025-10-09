@@ -1973,3 +1973,85 @@ class SessionMemoryStore:
                 "error": "Stats retrieval failed",
                 "message": str(e)
             }
+
+    def _list_sessions_impl(self, agent_id: str | None, limit: int) -> dict[str, Any]:
+        """
+        List recent sessions with activity counts.
+
+        Args:
+            agent_id: Optional agent filter
+            limit: Maximum number of sessions to return
+
+        Returns:
+            Dict with list of sessions ordered by most recent first
+        """
+        try:
+            conn = self._get_connection()
+
+            # Build WHERE clause
+            where_clause = "agent_id = ?" if agent_id else "1=1"
+            params = [agent_id] if agent_id else []
+
+            # Query sessions with aggregated info
+            rows = conn.execute(f"""
+                SELECT
+                    agent_id,
+                    session_id,
+                    COUNT(*) as memory_count,
+                    MAX(session_iter) as latest_iter,
+                    MAX(created_at) as latest_activity,
+                    MIN(created_at) as first_activity,
+                    GROUP_CONCAT(DISTINCT memory_type) as memory_types
+                FROM session_memories
+                WHERE {where_clause}
+                GROUP BY agent_id, session_id
+                ORDER BY latest_activity DESC
+                LIMIT ?
+            """, tuple(params + [limit])).fetchall()
+
+            conn.close()
+
+            # Build session info list
+            sessions = []
+            for row in rows:
+                # Convert latest_iter from "v1" to 1 if needed
+                latest_iter_val = row[2]
+                if isinstance(latest_iter_val, str) and latest_iter_val and latest_iter_val.startswith('v'):
+                    try:
+                        latest_iter_val = int(latest_iter_val[1:])
+                    except (ValueError, IndexError):
+                        latest_iter_val = 1
+                elif latest_iter_val is None:
+                    latest_iter_val = 1
+
+                sessions.append({
+                    "agent_id": row[0],
+                    "session_id": row[1],
+                    "memory_count": row[2],
+                    "latest_iter": latest_iter_val,
+                    "latest_activity": row[4],
+                    "first_activity": row[5],
+                    "memory_types": row[6].split(',') if row[6] else []
+                })
+
+            return {
+                "success": True,
+                "sessions": sessions,
+                "total_sessions": len(sessions),
+                "agent_filter": agent_id,
+                "limit": limit,
+                "error": None,
+                "message": f"Found {len(sessions)} sessions"
+            }
+
+        except Exception as e:
+            logger.error(f"Failed to list sessions: {e}", exc_info=True)
+            return {
+                "success": False,
+                "sessions": [],
+                "total_sessions": 0,
+                "agent_filter": agent_id,
+                "limit": limit,
+                "error": "List sessions failed",
+                "message": str(e)
+            }
