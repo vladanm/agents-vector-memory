@@ -1874,12 +1874,13 @@ class SessionMemoryStore:
                 "message": str(e)
             }
 
-    def _get_session_stats_impl(self, session_id: str) -> dict[str, Any]:
+    def _get_session_stats_impl(self, agent_id: str | None, session_id: str | None) -> dict[str, Any]:
         """
         Get statistics for a session.
 
         Args:
-            session_id: Session identifier
+            agent_id: Optional agent filter
+            session_id: Optional session identifier
 
         Returns:
             Dict with session statistics
@@ -1887,8 +1888,22 @@ class SessionMemoryStore:
         try:
             conn = self._get_connection()
 
-            # Get overall stats for this session
-            stats = conn.execute("""
+            # Build WHERE clause dynamically
+            where_parts = []
+            params = []
+
+            if session_id:
+                where_parts.append("session_id = ?")
+                params.append(session_id)
+
+            if agent_id:
+                where_parts.append("agent_id = ?")
+                params.append(agent_id)
+
+            where_clause = " AND ".join(where_parts) if where_parts else "1=1"
+
+            # Get overall stats
+            stats = conn.execute(f"""
                 SELECT
                     COUNT(*) as total_memories,
                     COUNT(DISTINCT memory_type) as memory_types,
@@ -1898,17 +1913,17 @@ class SessionMemoryStore:
                     AVG(LENGTH(content)) as avg_content_length,
                     SUM(access_count) as total_access_count
                 FROM session_memories
-                WHERE session_id = ?
-            """, (session_id,)).fetchone()
+                WHERE {where_clause}
+            """, tuple(params)).fetchone()
 
             # Get breakdown by memory type
-            breakdown_rows = conn.execute("""
+            breakdown_rows = conn.execute(f"""
                 SELECT memory_type, COUNT(*) as count
                 FROM session_memories
-                WHERE session_id = ?
+                WHERE {where_clause}
                 GROUP BY memory_type
                 ORDER BY count DESC
-            """, (session_id,)).fetchall()
+            """, tuple(params)).fetchall()
 
             conn.close()
 
@@ -1920,15 +1935,15 @@ class SessionMemoryStore:
                 "total_memories": stats[0],
                 "memory_types": stats[1],
                 "unique_agents": stats[2],
-                "unique_sessions": 1,  # Single session
+                "unique_sessions": 1 if session_id else stats[0],
                 "unique_tasks": stats[3],
                 "max_session_iter": stats[4],
                 "avg_content_length": round(stats[5], 2) if stats[5] else 0.0,
                 "total_access_count": stats[6] or 0,
                 "memory_type_breakdown": memory_type_breakdown,
-                "filters": {"session_id": session_id},
+                "filters": {"agent_id": agent_id, "session_id": session_id},
                 "error": None,
-                "message": f"Found {stats[0]} memories for session {session_id}"
+                "message": f"Found {stats[0]} memories"
             }
 
         except Exception as e:
@@ -1944,7 +1959,7 @@ class SessionMemoryStore:
                 "avg_content_length": None,
                 "total_access_count": None,
                 "memory_type_breakdown": None,
-                "filters": {"session_id": session_id},
+                "filters": {"agent_id": agent_id, "session_id": session_id},
                 "error": "Stats retrieval failed",
                 "message": str(e)
             }
