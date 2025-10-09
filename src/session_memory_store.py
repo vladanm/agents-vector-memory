@@ -2166,8 +2166,12 @@ class SessionMemoryStore:
 
             conn = self._get_connection()
 
-            # Calculate cutoff date
-            cutoff_date = (datetime.now(timezone.utc) - timedelta(days=days_old)).isoformat()
+            # Calculate cutoff date with overflow protection
+            try:
+                cutoff_date = (datetime.now(timezone.utc) - timedelta(days=days_old)).isoformat()
+            except OverflowError:
+                # If days_old is too large, use min datetime (will match nothing)
+                cutoff_date = datetime.min.replace(tzinfo=timezone.utc).isoformat()
 
             # Find memories to delete
             to_delete = conn.execute("""
