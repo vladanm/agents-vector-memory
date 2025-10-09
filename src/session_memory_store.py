@@ -1484,8 +1484,10 @@ class SessionMemoryStore:
                     "message": f"No chunk found with ID: {chunk_id}"
                 }
 
+            # Column indices: 0=id, 1=parent_id, 2=parent_title, 3=chunk_index, 4=content,
+            # 5=chunk_type, 6=start_char, 7=end_char, 8=token_count, 9=header_path, 10=level
             memory_id = target[1]  # parent_id
-            chunk_index = target[2]  # chunk_index
+            chunk_index = target[3]  # chunk_index (correct column)
 
             # Get surrounding chunks
             start_index = max(0, chunk_index - surrounding_chunks)
@@ -1504,11 +1506,11 @@ class SessionMemoryStore:
             for chunk in chunks:
                 all_chunks.append({
                     "chunk_id": chunk[0],
-                    "chunk_index": chunk[2],
-                    "content": chunk[3],
-                    "chunk_type": chunk[4],
-                    "header_path": chunk[8],
-                    "level": chunk[9]
+                    "chunk_index": chunk[3],  # Fixed: correct column index
+                    "content": chunk[4],       # Fixed: correct column index
+                    "chunk_type": chunk[5],    # Fixed: correct column index
+                    "header_path": chunk[9],
+                    "level": chunk[10]
                 })
 
             # Build expanded content
