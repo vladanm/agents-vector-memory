@@ -649,7 +649,12 @@ class SessionMemoryStore:
                 }
 
             # Validate session_id (must not be empty, except for knowledge_base)
-            if memory_type != "knowledge_base":
+            if memory_type == "knowledge_base":
+                # For knowledge_base, if no session_id provided, use "global"
+                if not session_id or session_id.strip() == "":
+                    session_id = "global"
+            else:
+                # For other memory types, session_id is required
                 if not session_id or session_id.strip() == "":
                     return {
                         "success": False,
