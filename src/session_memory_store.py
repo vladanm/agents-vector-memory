@@ -648,20 +648,21 @@ class SessionMemoryStore:
                     "message": "agent_id cannot be empty"
                 }
 
-            # Validate session_id (must not be empty)
-            if not session_id or session_id.strip() == "":
-                return {
-                    "success": False,
-                    "memory_id": None,
-                    "memory_type": None,
-                    "agent_id": None,
-                    "session_id": None,
-                    "content_hash": None,
-                    "chunks_created": None,
-                    "created_at": None,
-                    "error": "Invalid session_id",
-                    "message": "session_id cannot be empty"
-                }
+            # Validate session_id (must not be empty, except for knowledge_base)
+            if memory_type != "knowledge_base":
+                if not session_id or session_id.strip() == "":
+                    return {
+                        "success": False,
+                        "memory_id": None,
+                        "memory_type": None,
+                        "agent_id": None,
+                        "session_id": None,
+                        "content_hash": None,
+                        "chunks_created": None,
+                        "created_at": None,
+                        "error": "Invalid session_id",
+                        "message": "session_id cannot be empty for this memory type"
+                    }
 
             # Get memory type config
             config = get_memory_type_config(memory_type)
