@@ -2197,9 +2197,13 @@ class SessionMemoryStore:
             count = len(to_delete)
 
             if not dry_run:
-                # Actually delete
+                # Actually delete memories and their chunks
                 for row in to_delete:
-                    conn.execute("DELETE FROM session_memories WHERE id = ?", (row[0],))
+                    memory_id = row[0]
+                    # Delete associated chunks first (foreign keys may not be enabled)
+                    conn.execute("DELETE FROM memory_chunks WHERE parent_id = ?", (memory_id,))
+                    # Then delete the memory
+                    conn.execute("DELETE FROM session_memories WHERE id = ?", (memory_id,))
                 conn.commit()
 
             conn.close()
