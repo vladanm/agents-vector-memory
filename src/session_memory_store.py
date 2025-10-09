@@ -327,10 +327,18 @@ class SessionMemoryStore:
         """Create a new database connection with vector search enabled."""
         conn = sqlite3.connect(self.db_path, timeout=30.0)
         conn.row_factory = sqlite3.Row
+
+        # CRITICAL: Set foreign_keys FIRST before any other operations
+        conn.execute("PRAGMA foreign_keys=ON")
+
+        # Then set other PRAGMAs
         conn.execute("PRAGMA journal_mode=WAL")
         conn.execute("PRAGMA synchronous=NORMAL")
         conn.execute("PRAGMA busy_timeout=30000")
-        conn.execute("PRAGMA foreign_keys=ON")
+
+        # Performance optimizations
+        conn.execute("PRAGMA cache_size = -64000")  # 64MB cache
+        conn.execute("PRAGMA temp_store = MEMORY")
 
         # Enable vector search (load sqlite-vec)
         if SQLITE_VEC_AVAILABLE:

@@ -31,14 +31,26 @@ def run_migrations(db_path: str) -> None:
         # Disable extension loading for security
         conn.enable_load_extension(False)
 
-        # Enable WAL mode FIRST (before creating tables) for better concurrency
+        # ============================================================
+        # CRITICAL: Apply ALL PRAGMA settings before any table operations
+        # ============================================================
+        # MUST BE FIRST: Enable foreign key constraints (CRITICAL for CASCADE)
+        conn.execute("PRAGMA foreign_keys = ON")
+
+        # Enable WAL mode for better concurrency
         conn.execute("PRAGMA journal_mode=WAL")
 
         # Set synchronous mode to NORMAL for performance (safe with WAL)
         conn.execute("PRAGMA synchronous=NORMAL")
 
-        # Enable foreign key constraints
-        conn.execute("PRAGMA foreign_keys = ON")
+        # Set busy timeout (30 seconds) to handle database locks gracefully
+        conn.execute("PRAGMA busy_timeout = 30000")
+
+        # Increase cache size to 64MB for better performance
+        conn.execute("PRAGMA cache_size = -64000")
+
+        # Use memory for temporary operations (faster)
+        conn.execute("PRAGMA temp_store = MEMORY")
 
         # Create main memory table
         conn.execute("""
