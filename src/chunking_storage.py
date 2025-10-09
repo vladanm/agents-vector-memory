@@ -20,13 +20,12 @@ class ChunkingStorageOperations:
 
     def expand_chunk_context(
         self,
-        memory_id: int,
-        chunk_index: int,
-        context_window: int = 2
+        chunk_id: int,
+        surrounding_chunks: int = 2
     ) -> dict[str, Any]:
         """Expand chunk context by retrieving surrounding chunks."""
         return self.store._expand_chunk_context_impl(
-            memory_id, chunk_index, context_window
+            chunk_id, surrounding_chunks
         )
 
     def get_chunk(

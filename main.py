@@ -649,8 +649,24 @@ def expand_chunk_context(
     Expand context around a specific chunk.
     Returns the chunk with surrounding chunks for better understanding.
     """
+    # Convert chunk_id string to int
+    try:
+        chunk_id_int = int(chunk_id)
+    except (ValueError, TypeError):
+        return {
+            "success": False,
+            "memory_id": None,
+            "target_chunk_index": None,
+            "context_window": None,
+            "chunks_returned": None,
+            "expanded_content": None,
+            "chunks": None,
+            "error": "Invalid chunk_id",
+            "message": f"chunk_id must be a valid integer, got: {chunk_id}"
+        }
+
     result = store.expand_chunk_context(
-        chunk_id=chunk_id,
+        chunk_id=chunk_id_int,
         surrounding_chunks=surrounding_chunks
     )
     return result

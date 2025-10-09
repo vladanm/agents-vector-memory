@@ -1448,17 +1448,15 @@ class SessionMemoryStore:
                 }
     def _expand_chunk_context_impl(
         self,
-        memory_id: int,
-        chunk_index: int,
-        context_window: int = 2
+        chunk_id: int,
+        surrounding_chunks: int = 2
     ) -> dict[str, Any]:
         """
         Expand chunk context by retrieving surrounding chunks.
 
         Args:
-            memory_id: Parent memory ID
-            chunk_index: Target chunk index
-            context_window: Number of chunks before/after to retrieve
+            chunk_id: Target chunk ID
+            surrounding_chunks: Number of chunks before/after to retrieve
 
         Returns:
             Dict with target chunk and surrounding context
@@ -1466,11 +1464,11 @@ class SessionMemoryStore:
         try:
             conn = self._get_connection()
 
-            # Get target chunk
+            # Get target chunk and find its parent_id and chunk_index
             target = conn.execute("""
                 SELECT * FROM memory_chunks
-                WHERE parent_id = ? AND chunk_index = ?
-            """, (memory_id, chunk_index)).fetchone()
+                WHERE id = ?
+            """, (chunk_id,)).fetchone()
 
             if not target:
                 conn.close()
@@ -1483,12 +1481,15 @@ class SessionMemoryStore:
                     "expanded_content": None,
                     "chunks": None,
                     "error": "Chunk not found",
-                    "message": f"No chunk found at index {chunk_index} for memory {memory_id}"
+                    "message": f"No chunk found with ID: {chunk_id}"
                 }
 
+            memory_id = target[1]  # parent_id
+            chunk_index = target[2]  # chunk_index
+
             # Get surrounding chunks
-            start_index = max(0, chunk_index - context_window)
-            end_index = chunk_index + context_window
+            start_index = max(0, chunk_index - surrounding_chunks)
+            end_index = chunk_index + surrounding_chunks
 
             chunks = conn.execute("""
                 SELECT * FROM memory_chunks
@@ -1517,7 +1518,7 @@ class SessionMemoryStore:
                 "success": True,
                 "memory_id": memory_id,
                 "target_chunk_index": chunk_index,
-                "context_window": context_window,
+                "context_window": surrounding_chunks,
                 "chunks_returned": len(all_chunks),
                 "expanded_content": expanded_content,
                 "chunks": all_chunks,
