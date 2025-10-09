@@ -414,7 +414,7 @@ def search_reports_specific_chunks(
     """
     result = store.search_with_granularity(
         query=query,
-        memory_type="report",
+        memory_type="reports",
         granularity="fine",
         agent_id=agent_id,
         session_id=session_id,
@@ -441,7 +441,7 @@ def search_reports_section_context(
     """
     result = store.search_with_granularity(
         query=query,
-        memory_type="report",
+        memory_type="reports",
         granularity="medium",
         agent_id=agent_id,
         session_id=session_id,
@@ -468,7 +468,7 @@ def search_reports_full_documents(
     """
     result = store.search_with_granularity(
         query=query,
-        memory_type="report",
+        memory_type="reports",
         granularity="coarse",
         agent_id=agent_id,
         session_id=session_id,
