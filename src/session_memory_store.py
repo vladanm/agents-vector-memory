@@ -880,6 +880,12 @@ class SessionMemoryStore:
             conn.close()
 
             # Format results
+            # Column indices from PRAGMA table_info:
+            # 0=id, 1=memory_type, 2=agent_id, 3=session_id, 4=session_iter(INT),
+            # 5=task_code, 6=content, 7=original_content, 8=title, 9=description,
+            # 10=tags, 11=metadata, 12=content_hash, 13=embedding, 14=created_at,
+            # 15=updated_at, 16=accessed_at, 17=access_count(INT), 18=auto_chunk,
+            # 19=chunk_count, 20=auto_chunked
             results = []
             for row in rows:
                 results.append({
@@ -887,18 +893,18 @@ class SessionMemoryStore:
                     "memory_type": row[1],
                     "agent_id": row[2],
                     "session_id": row[3],
-                    "session_iter": row[4],
+                    "session_iter": row[4],  # Already INTEGER in DB
                     "task_code": row[5],
                     "content": row[6],
-                    "title": row[7],
-                    "description": row[8],
-                    "tags": json.loads(row[9]) if row[9] else [],
-                    "metadata": json.loads(row[10]) if row[10] else {},
-                    "content_hash": row[11],
-                    "created_at": row[12],
-                    "updated_at": row[13],
-                    "accessed_at": row[14],
-                    "access_count": row[15],
+                    "title": row[8],  # Fixed: was row[7], skipped original_content
+                    "description": row[9],  # Fixed: was row[8]
+                    "tags": json.loads(row[10]) if row[10] else [],  # Fixed: was row[9]
+                    "metadata": json.loads(row[11]) if row[11] else {},  # Fixed: was row[10]
+                    "content_hash": row[12],  # Fixed: was row[11]
+                    "created_at": row[14],  # Fixed: was row[12], skipped embedding
+                    "updated_at": row[15] or row[14],  # Fixed: was row[13], fallback to created_at
+                    "accessed_at": row[16],  # Fixed: was row[14]
+                    "access_count": row[17],  # Fixed: was row[15], already INTEGER
                     "similarity": 2.0,  # Placeholder for scoped match
                     "source_type": "scoped"
                 })
