@@ -582,6 +582,10 @@ class SessionMemoryStore:
         """Get session statistics."""
         return self.maintenance.get_session_stats(*args, **kwargs)
 
+    def list_sessions(self, *args, **kwargs) -> dict[str, Any]:
+        """List recent sessions."""
+        return self.maintenance.list_sessions(*args, **kwargs)
+
     # ======================
     # CORE IMPLEMENTATION METHODS
     # ======================
