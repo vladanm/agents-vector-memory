@@ -888,12 +888,22 @@ class SessionMemoryStore:
             # 19=chunk_count, 20=auto_chunked
             results = []
             for row in rows:
+                # Convert session_iter from "v1" string to 1 integer if needed
+                session_iter_val = row[4]
+                if isinstance(session_iter_val, str) and session_iter_val.startswith('v'):
+                    try:
+                        session_iter_val = int(session_iter_val[1:])
+                    except (ValueError, IndexError):
+                        session_iter_val = 1  # Default fallback
+                elif session_iter_val is None:
+                    session_iter_val = 1  # Default fallback
+
                 results.append({
                     "id": row[0],
                     "memory_type": row[1],
                     "agent_id": row[2],
                     "session_id": row[3],
-                    "session_iter": row[4],  # Already INTEGER in DB
+                    "session_iter": session_iter_val,  # Converted to INTEGER
                     "task_code": row[5],
                     "content": row[6],
                     "title": row[8],  # Fixed: was row[7], skipped original_content
