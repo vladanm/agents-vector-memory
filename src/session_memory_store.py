@@ -1873,3 +1873,78 @@ class SessionMemoryStore:
                 "error": "Write failed",
                 "message": str(e)
             }
+
+    def _get_session_stats_impl(self, session_id: str) -> dict[str, Any]:
+        """
+        Get statistics for a session.
+
+        Args:
+            session_id: Session identifier
+
+        Returns:
+            Dict with session statistics
+        """
+        try:
+            conn = self._get_connection()
+
+            # Get overall stats for this session
+            stats = conn.execute("""
+                SELECT
+                    COUNT(*) as total_memories,
+                    COUNT(DISTINCT memory_type) as memory_types,
+                    COUNT(DISTINCT agent_id) as unique_agents,
+                    COUNT(DISTINCT task_code) as unique_tasks,
+                    MAX(session_iter) as max_session_iter,
+                    AVG(LENGTH(content)) as avg_content_length,
+                    SUM(access_count) as total_access_count
+                FROM session_memories
+                WHERE session_id = ?
+            """, (session_id,)).fetchone()
+
+            # Get breakdown by memory type
+            breakdown_rows = conn.execute("""
+                SELECT memory_type, COUNT(*) as count
+                FROM session_memories
+                WHERE session_id = ?
+                GROUP BY memory_type
+                ORDER BY count DESC
+            """, (session_id,)).fetchall()
+
+            conn.close()
+
+            # Build memory type breakdown dict
+            memory_type_breakdown = {row[0]: row[1] for row in breakdown_rows}
+
+            return {
+                "success": True,
+                "total_memories": stats[0],
+                "memory_types": stats[1],
+                "unique_agents": stats[2],
+                "unique_sessions": 1,  # Single session
+                "unique_tasks": stats[3],
+                "max_session_iter": stats[4],
+                "avg_content_length": round(stats[5], 2) if stats[5] else 0.0,
+                "total_access_count": stats[6] or 0,
+                "memory_type_breakdown": memory_type_breakdown,
+                "filters": {"session_id": session_id},
+                "error": None,
+                "message": f"Found {stats[0]} memories for session {session_id}"
+            }
+
+        except Exception as e:
+            logger.error(f"Failed to get session stats: {e}", exc_info=True)
+            return {
+                "success": False,
+                "total_memories": None,
+                "memory_types": None,
+                "unique_agents": None,
+                "unique_sessions": None,
+                "unique_tasks": None,
+                "max_session_iter": None,
+                "avg_content_length": None,
+                "total_access_count": None,
+                "memory_type_breakdown": None,
+                "filters": {"session_id": session_id},
+                "error": "Stats retrieval failed",
+                "message": str(e)
+            }
