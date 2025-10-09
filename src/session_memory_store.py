@@ -586,6 +586,10 @@ class SessionMemoryStore:
         """List recent sessions."""
         return self.maintenance.list_sessions(*args, **kwargs)
 
+    def load_session_context(self, session_id: str, session_iter: str) -> dict[str, Any]:
+        """Load all relevant session context for continuation."""
+        return self._load_session_context_impl(session_id, session_iter)
+
     # ======================
     # CORE IMPLEMENTATION METHODS
     # ======================
@@ -2058,4 +2062,83 @@ class SessionMemoryStore:
                 "limit": limit,
                 "error": "List sessions failed",
                 "message": str(e)
+            }
+
+    def _load_session_context_impl(self, session_id: str, session_iter: str) -> dict[str, Any]:
+        """
+        Load all relevant session context for task continuation.
+
+        Args:
+            session_id: Session identifier
+            session_iter: Session iteration (e.g., "v1", "v2")
+
+        Returns:
+            Dict with session context if found
+        """
+        try:
+            conn = self._get_connection()
+
+            # Convert session_iter to integer for comparison
+            session_iter_int = None
+            if isinstance(session_iter, str) and session_iter.startswith('v'):
+                try:
+                    session_iter_int = int(session_iter[1:])
+                except (ValueError, IndexError):
+                    session_iter_int = 1
+            elif isinstance(session_iter, int):
+                session_iter_int = session_iter
+            else:
+                session_iter_int = 1
+
+            # Find latest session_context memory for this session
+            row = conn.execute("""
+                SELECT * FROM session_memories
+                WHERE memory_type = 'session_context'
+                AND session_id = ?
+                AND session_iter = ?
+                ORDER BY created_at DESC
+                LIMIT 1
+            """, (session_id, session_iter)).fetchone()
+
+            conn.close()
+
+            if not row:
+                return {
+                    "success": True,
+                    "found_previous_context": False,
+                    "context": None,
+                    "message": f"No session context found for session {session_id} iteration {session_iter}",
+                    "error": None
+                }
+
+            return {
+                "success": True,
+                "found_previous_context": True,
+                "context": {
+                    "id": row[0],
+                    "memory_type": row[1],
+                    "agent_id": row[2],
+                    "session_id": row[3],
+                    "session_iter": session_iter_int,
+                    "task_code": row[5],
+                    "content": row[6],
+                    "title": row[8],
+                    "description": row[9],
+                    "tags": json.loads(row[10]) if row[10] else [],
+                    "metadata": json.loads(row[11]) if row[11] else {},
+                    "created_at": row[14],
+                    "updated_at": row[15] or row[14]
+                },
+                "message": f"Found session context for {session_id}:{session_iter}",
+                "error": None
+            }
+
+        except Exception as e:
+            logger.error(f"Failed to load session context: {e}", exc_info=True)
+            return {
+                "success": False,
+                "found_previous_context": False,
+                "context": None,
+                "message": str(e),
+                "error": "Failed to load session context"
             }
