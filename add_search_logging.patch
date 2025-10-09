@@ -1,0 +1,112 @@
+--- a/src/session_memory_store.py
++++ b/src/session_memory_store.py
+@@ -648,8 +648,18 @@ class SessionMemoryStore:
+             result["granularity"] = "coarse"
+             return result
+
+         elif granularity == "fine":
+             # Return individual chunks using vector search
++            logger.info("=" * 80)
++            logger.info("FINE GRANULARITY SEARCH STARTING")
++            logger.info(f"  memory_type: {memory_type}")
++            logger.info(f"  query: {query[:100]}...")
++            logger.info(f"  agent_id: {agent_id}")
++            logger.info(f"  session_id: {session_id}")
++            logger.info(f"  session_iter: {session_iter}")
++            logger.info(f"  task_code: {task_code}")
++            logger.info(f"  limit: {limit}")
++            logger.info(f"  similarity_threshold: {similarity_threshold}")
++            logger.info("=" * 80)
+             try:
+                 # Get embedding model
+                 model = self.embedding_model
+@@ -671,6 +681,8 @@ class SessionMemoryStore:
+                 # Use larger k to account for post-filtering
+                 k_value = limit * 10  # Increased for post-filtering
+
++                logger.info(f"Using k_value={k_value} for vector search (limit * 10)")
++
+                 # Vector search over chunks - NO metadata filters in WHERE
+                 conn = self._get_connection()
+
+@@ -697,13 +709,31 @@ class SessionMemoryStore:
+                     ORDER BY distance
+                 """
+
++                logger.info("Executing vector search SQL...")
+                 params = [query_bytes, k_value]
+                 rows = conn.execute(sql, params).fetchall()
+                 conn.close()
++
++                logger.info(f"Vector search returned {len(rows)} raw chunks before filtering")
++                if rows:
++                    logger.info(f"  First chunk distance: {rows[0][7]}")
++                    logger.info(f"  First chunk memory_type: {rows[0][8]}")
++                    logger.info(f"  First chunk session_id: {rows[0][10]}")
+
+                 # Filter results in Python based on metadata
+                 results = []
++                filtered_counts = {
++                    "memory_type": 0,
++                    "agent_id": 0,
++                    "session_id": 0,
++                    "session_iter": 0,
++                    "task_code": 0,
++                    "similarity": 0
++                }
++
+                 for row in rows:
++                    if len(results) >= limit:
++                        break
++
+                     distance = row[7]
+                     row_memory_type = row[8]
+                     row_agent_id = row[9]
+@@ -713,17 +743,24 @@ class SessionMemoryStore:
+
+                     # Apply metadata filters
+                     if row_memory_type != memory_type:
++                        filtered_counts["memory_type"] += 1
+                         continue
+                     if agent_id and row_agent_id != agent_id:
++                        filtered_counts["agent_id"] += 1
+                         continue
+                     if session_id and row_session_id != session_id:
++                        filtered_counts["session_id"] += 1
+                         continue
+                     if session_iter is not None and row_session_iter != session_iter:
++                        filtered_counts["session_iter"] += 1
+                         continue
+                     if task_code and row_task_code != task_code:
++                        filtered_counts["task_code"] += 1
+                         continue
+
+                     similarity = 1.0 - (distance / 2.0)  # Convert distance to similarity
+
+                     # Apply similarity threshold
+                     if similarity >= similarity_threshold:
+@@ -739,13 +776,23 @@ class SessionMemoryStore:
+                             "source": "chunk",
+                             "granularity": "fine"
+                         })
+-
+-                    if len(results) >= limit:
+-                        break
++                    else:
++                        filtered_counts["similarity"] += 1
++
++                logger.info("=" * 80)
++                logger.info("FILTERING RESULTS:")
++                logger.info(f"  Filtered by memory_type: {filtered_counts['memory_type']}")
++                logger.info(f"  Filtered by agent_id: {filtered_counts['agent_id']}")
++                logger.info(f"  Filtered by session_id: {filtered_counts['session_id']}")
++                logger.info(f"  Filtered by session_iter: {filtered_counts['session_iter']}")
++                logger.info(f"  Filtered by task_code: {filtered_counts['task_code']}")
++                logger.info(f"  Filtered by similarity: {filtered_counts['similarity']}")
++                logger.info(f"  FINAL RESULTS: {len(results)} chunks")
++                if results:
++                    logger.info(f"  Best similarity: {results[0]['similarity']}")
++                logger.info("=" * 80)
+
+                 return {
+                     "success": True,

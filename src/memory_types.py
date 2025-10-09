@@ -67,38 +67,38 @@ def get_memory_type_config(memory_type: str) -> dict[str, Any]:
     """
     configs = {
         "knowledge_base": {
-            "chunk_size": 1200,
-            "chunk_overlap": 120,
+            "chunk_size": 512,      # Was 1200 - reduced to fit within 512 token embedding limit
+            "chunk_overlap": 64,    # Was 120 - 12.5% overlap maintained
             "preserve_structure": True,
             "default_auto_chunk": True
         },
         "reports": {
-            "chunk_size": 1500,
-            "chunk_overlap": 150,
+            "chunk_size": 512,      # Was 1500 - reduced to fit within 512 token embedding limit
+            "chunk_overlap": 64,    # Was 150 - 12.5% overlap maintained
             "preserve_structure": True,
             "default_auto_chunk": True
         },
         "working_memory": {
-            "chunk_size": 800,
-            "chunk_overlap": 80,
+            "chunk_size": 400,      # Was 800 - reduced to fit within 512 token embedding limit
+            "chunk_overlap": 48,    # Was 80 - 12% overlap maintained
             "preserve_structure": True,
             "default_auto_chunk": True
         },
         "session_context": {
-            "chunk_size": 1000,
-            "chunk_overlap": 100,
+            "chunk_size": 450,      # Was 1000 - reduced to fit within 512 token embedding limit
+            "chunk_overlap": 50,    # Was 100 - 11% overlap maintained
             "preserve_structure": False,
             "default_auto_chunk": False
         },
         "input_prompt": {
-            "chunk_size": 2000,
-            "chunk_overlap": 200,
+            "chunk_size": 512,      # Was 2000 - reduced to fit within 512 token embedding limit
+            "chunk_overlap": 64,    # Was 200 - 12.5% overlap maintained
             "preserve_structure": False,
             "default_auto_chunk": False
         },
         "system_memory": {
-            "chunk_size": 1500,
-            "chunk_overlap": 150,
+            "chunk_size": 512,      # Was 1500 - reduced to fit within 512 token embedding limit
+            "chunk_overlap": 64,    # Was 150 - 12.5% overlap maintained
             "preserve_structure": True,
             "default_auto_chunk": False
         }
@@ -106,8 +106,8 @@ def get_memory_type_config(memory_type: str) -> dict[str, Any]:
 
     # Default config if memory_type not found
     default_config = {
-        "chunk_size": 1000,
-        "chunk_overlap": 100,
+        "chunk_size": 450,          # Was 1000 - reduced to fit within 512 token embedding limit
+        "chunk_overlap": 50,        # Was 100 - 11% overlap maintained
         "preserve_structure": False,
         "default_auto_chunk": False
     }

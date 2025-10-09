@@ -32,6 +32,12 @@ try:
 except ImportError:
     YAML_AVAILABLE = False
 
+try:
+    import sqlite_vec
+    SQLITE_VEC_AVAILABLE = True
+except ImportError:
+    SQLITE_VEC_AVAILABLE = False
+
 from .chunking import DocumentChunker, ChunkingConfig
 from .memory_types import ContentFormat, ChunkEntry, get_memory_type_config
 
@@ -93,46 +99,64 @@ class SessionMemoryStore:
         self.maintenance = MaintenanceOperations(self)
         self.chunking = ChunkingStorageOperations(self)
 
-    def _init_schema(self):
-        """Initialize database schema using migrations."""
-        from .db_migrations import run_migrations
-        run_migrations(self.db_path)
+    # ======================
+    # LAZY-LOADED PROPERTIES
+    # ======================
 
+    @property
+    def token_encoder(self):
+        """Cached token encoder instance."""
+        if not hasattr(self, '_token_encoder'):
+            if TIKTOKEN_AVAILABLE:
+                try:
+                    import tiktoken
+                    self._token_encoder = tiktoken.get_encoding("cl100k_base")
+                except Exception as e:
+                    logger.warning(f"Failed to initialize tiktoken: {e}")
+                    self._token_encoder = None
+            else:
+                self._token_encoder = None
+        return self._token_encoder
+
+    def count_tokens(self, text: str) -> int:
+        """Count tokens in text."""
+        if self.token_encoder:
+            return len(self.token_encoder.encode(text))
+        # Fallback: rough estimate (1 token ≈ 4 characters)
+        return len(text) // 4
+
+    # ======================
+    # DATABASE CONNECTION & SCHEMA
+    # ======================
 
     def _get_connection(self) -> sqlite3.Connection:
-        """
-        Get database connection with WAL mode and optimizations.
-
-        Returns:
-            sqlite3.Connection: Database connection configured with:
-                - WAL (Write-Ahead Logging) mode for better concurrency
-                - NORMAL synchronous mode for performance
-                - Foreign keys enabled for referential integrity
-                - Memory-based temp storage for performance
-                - Memory-mapped I/O for large databases
-
-        Note:
-            This method creates a new connection each time it is called.
-            The caller is responsible for closing the connection.
-        """
-        conn = sqlite3.connect(self.db_path)
-
-        # Enable WAL mode for better concurrency
+        """Create a new database connection with vector search enabled."""
+        conn = sqlite3.connect(self.db_path, timeout=30.0)
+        conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA journal_mode=WAL")
-
-        # Set synchronous mode to NORMAL (faster than FULL, still safe with WAL)
         conn.execute("PRAGMA synchronous=NORMAL")
-
-        # Enable foreign key constraints
+        conn.execute("PRAGMA busy_timeout=30000")
         conn.execute("PRAGMA foreign_keys=ON")
 
-        # Use memory for temporary storage (faster)
-        conn.execute("PRAGMA temp_store=MEMORY")
-
-        # Enable memory-mapped I/O (faster for large databases)
-        conn.execute("PRAGMA mmap_size=30000000000")
+        # Enable vector search (load sqlite-vec)
+        if SQLITE_VEC_AVAILABLE:
+            try:
+                conn.enable_load_extension(True)
+                sqlite_vec.load(conn)
+                conn.enable_load_extension(False)
+            except Exception as e:
+                logger.warning(f"Failed to load sqlite-vec: {e}")
 
         return conn
+
+    def _init_schema(self):
+        """Initialize database schema with retry logic."""
+        from .db_migrations import ensure_schema_up_to_date
+        ensure_schema_up_to_date(self.db_path)
+
+    # ======================
+    # LAZY-LOADED COMPONENTS
+    # ======================
 
     @property
     def chunker(self) -> 'DocumentChunker':
@@ -147,8 +171,10 @@ class SessionMemoryStore:
         if not hasattr(self, '_token_encoder'):
             if TIKTOKEN_AVAILABLE:
                 try:
+                    import tiktoken
                     self._token_encoder = tiktoken.get_encoding("cl100k_base")
-                except Exception:
+                except Exception as e:
+                    logger.warning(f"Failed to initialize tiktoken: {e}")
                     self._token_encoder = None
             else:
                 self._token_encoder = None
@@ -191,21 +217,13 @@ class SessionMemoryStore:
         """Expand chunk context."""
         return self.chunking.expand_chunk_context(*args, **kwargs)
 
-    def load_session_context_for_task(self, *args, **kwargs) -> dict[str, Any]:
-        """Load session context for task."""
-        return self.search.load_session_context_for_task(*args, **kwargs)
-
     def get_memory(self, *args, **kwargs) -> dict[str, Any]:
         """Get memory by ID."""
         return self.storage.get_memory(*args, **kwargs)
 
-    def get_session_stats(self, *args, **kwargs) -> dict[str, Any]:
-        """Get session statistics."""
-        return self.maintenance.get_session_stats(*args, **kwargs)
-
-    def list_sessions(self, *args, **kwargs) -> dict[str, Any]:
-        """List sessions."""
-        return self.maintenance.list_sessions(*args, **kwargs)
+    def delete_memory(self, *args, **kwargs) -> dict[str, Any]:
+        """Delete memory."""
+        return self.storage.delete_memory(*args, **kwargs)
 
     def reconstruct_document(self, *args, **kwargs) -> dict[str, Any]:
         """Reconstruct document from chunks."""
@@ -215,12 +233,20 @@ class SessionMemoryStore:
         """Write document to file."""
         return self.storage.write_document_to_file(*args, **kwargs)
 
-    def delete_memory(self, *args, **kwargs) -> dict[str, Any]:
-        """Delete memory."""
-        return self.storage.delete_memory(*args, **kwargs)
+    def load_session_context_for_task(self, *args, **kwargs) -> dict[str, Any]:
+        """Load session context."""
+        return self.search.load_session_context_for_task(*args, **kwargs)
+
+    def list_memories(self, *args, **kwargs) -> dict[str, Any]:
+        """List memories."""
+        return self.maintenance.list_memories(*args, **kwargs)
+
+    def get_session_stats(self, *args, **kwargs) -> dict[str, Any]:
+        """Get session statistics."""
+        return self.maintenance.get_session_stats(*args, **kwargs)
 
     # ======================
-    # IMPLEMENTATION METHODS
+    # CORE IMPLEMENTATION METHODS
     # ======================
 
     def _store_memory_impl(
@@ -263,8 +289,45 @@ class SessionMemoryStore:
             if memory_type not in VALID_MEMORY_TYPES:
                 return {
                     "success": False,
+                    "memory_id": None,
+                    "memory_type": None,
+                    "agent_id": None,
+                    "session_id": None,
+                    "content_hash": None,
+                    "chunks_created": None,
+                    "created_at": None,
                     "error": "Invalid memory type",
                     "message": f"Memory type must be one of: {VALID_MEMORY_TYPES}"
+                }
+
+            # Validate agent_id (must not be empty)
+            if not agent_id or agent_id.strip() == "":
+                return {
+                    "success": False,
+                    "memory_id": None,
+                    "memory_type": None,
+                    "agent_id": None,
+                    "session_id": None,
+                    "content_hash": None,
+                    "chunks_created": None,
+                    "created_at": None,
+                    "error": "Invalid agent_id",
+                    "message": "agent_id cannot be empty"
+                }
+
+            # Validate session_id (must not be empty)
+            if not session_id or session_id.strip() == "":
+                return {
+                    "success": False,
+                    "memory_id": None,
+                    "memory_type": None,
+                    "agent_id": None,
+                    "session_id": None,
+                    "content_hash": None,
+                    "chunks_created": None,
+                    "created_at": None,
+                    "error": "Invalid session_id",
+                    "message": "session_id cannot be empty"
                 }
 
             # Get memory type config
@@ -272,7 +335,7 @@ class SessionMemoryStore:
 
             # Determine if we should chunk (default based on memory type)
             if auto_chunk is None:
-                auto_chunk = config.get('auto_chunk', False)
+                auto_chunk = config.get('default_auto_chunk', False)
 
             # Generate content hash
             content_hash = hashlib.sha256(content.encode()).hexdigest()
@@ -299,13 +362,21 @@ class SessionMemoryStore:
                 chunks = self.chunker.chunk_document(content, 0, chunk_metadata)
 
                 # Generate embeddings for all chunks in batch (10-50x faster than sequential)
-                if self.embedding_model and chunks:
+                # FIX: Always try to generate embeddings if chunks exist
+                # The embedding_model property will handle lazy loading and error cases
+                if chunks:
                     chunk_texts = [chunk.content for chunk in chunks]
                     try:
-                        embeddings = self.embedding_model.encode(chunk_texts, batch_size=32, show_progress_bar=False)
-                        # Convert embeddings to bytes and attach to chunks
-                        for i, chunk in enumerate(chunks):
-                            chunk.embedding = embeddings[i].tobytes()
+                        # Use the property (not _embedding_model) to trigger lazy loading
+                        model = self.embedding_model
+                        if model is not None:
+                            embeddings = model.encode(chunk_texts, batch_size=32, show_progress_bar=False)
+                            # Convert embeddings to bytes and attach to chunks
+                            for i, chunk in enumerate(chunks):
+                                chunk.embedding = embeddings[i].tobytes()
+                            logger.info(f"Generated {len(embeddings)} chunk embeddings")
+                        else:
+                            logger.warning("Embedding model not available, chunks will not have embeddings")
                     except Exception as e:
                         logger.warning(f"Failed to generate embeddings for chunks: {e}")
                         # Continue without embeddings
@@ -367,6 +438,7 @@ class SessionMemoryStore:
                 chunks_created = len(chunks)
 
                 conn.commit()
+                conn.close()
 
                 return {
                     "success": True,
@@ -377,16 +449,26 @@ class SessionMemoryStore:
                     "content_hash": content_hash,
                     "chunks_created": chunks_created,
                     "created_at": now,
-                    "message": f"Memory stored successfully with ID: {memory_id}"
+                    "message": f"Memory stored successfully with ID: {memory_id}",
+                    "error": None
                 }
 
-            finally:
-                # CRITICAL: Always close connection, even if an error occurs
+            except Exception as e:
+                conn.rollback()
                 conn.close()
+                raise
 
         except Exception as e:
+            logger.error(f"Failed to store memory: {e}", exc_info=True)
             return {
                 "success": False,
+                "memory_id": None,
+                "memory_type": None,
+                "agent_id": None,
+                "session_id": None,
+                "content_hash": None,
+                "chunks_created": None,
+                "created_at": None,
                 "error": "Storage failed",
                 "message": str(e)
             }
@@ -405,18 +487,15 @@ class SessionMemoryStore:
         """
         Search memories with optional filters.
 
-        For semantic search (query parameter), this requires embeddings.
-        Without query, performs filtered listing.
-
         Args:
-            memory_type: Filter by memory type
-            agent_id: Filter by agent ID
-            session_id: Filter by session ID
-            session_iter: Filter by specific iteration
-            task_code: Filter by task code
-            query: Semantic search query (requires embeddings)
-            limit: Maximum results to return
-            latest_first: Order by latest iteration/creation first
+            memory_type: Optional memory type filter
+            agent_id: Optional agent filter
+            session_id: Optional session filter
+            session_iter: Optional iteration filter
+            task_code: Optional task code filter
+            query: Optional semantic search query
+            limit: Maximum results
+            latest_first: Sort by newest first
 
         Returns:
             Dict with search results
@@ -424,47 +503,41 @@ class SessionMemoryStore:
         try:
             conn = self._get_connection()
 
-            # Build WHERE clause
-            where_conditions = []
+            # Build query
+            conditions = []
             params = []
 
             if memory_type:
-                where_conditions.append("memory_type = ?")
+                conditions.append("memory_type = ?")
                 params.append(memory_type)
-
             if agent_id:
-                where_conditions.append("agent_id = ?")
+                conditions.append("agent_id = ?")
                 params.append(agent_id)
-
             if session_id:
-                where_conditions.append("session_id = ?")
+                conditions.append("session_id = ?")
                 params.append(session_id)
-
             if session_iter is not None:
-                where_conditions.append("session_iter = ?")
+                conditions.append("session_iter = ?")
                 params.append(session_iter)
-
             if task_code:
-                where_conditions.append("task_code = ?")
+                conditions.append("task_code = ?")
                 params.append(task_code)
 
-            where_clause = "WHERE " + " AND ".join(where_conditions) if where_conditions else ""
+            where_clause = ""
+            if conditions:
+                where_clause = "WHERE " + " AND ".join(conditions)
 
-            # Build ORDER BY clause
-            if latest_first:
-                order_clause = "ORDER BY session_iter DESC, created_at DESC"
-            else:
-                order_clause = "ORDER BY session_iter ASC, created_at ASC"
+            order_clause = "ORDER BY session_iter DESC, created_at DESC" if latest_first else "ORDER BY session_iter ASC, created_at ASC"
 
-            # Execute query
-            params.append(limit)
-            rows = conn.execute(f"""
+            sql = f"""
                 SELECT * FROM session_memories
                 {where_clause}
                 {order_clause}
                 LIMIT ?
-            """, params).fetchall()
+            """
+            params.append(limit)
 
+            rows = conn.execute(sql, params).fetchall()
             conn.close()
 
             # Format results
@@ -487,7 +560,7 @@ class SessionMemoryStore:
                     "updated_at": row[13],
                     "accessed_at": row[14],
                     "access_count": row[15],
-                    "similarity": 2.0,  # Perfect match for filtered results
+                    "similarity": 2.0,  # Placeholder for scoped match
                     "source_type": "scoped"
                 })
 
@@ -504,12 +577,21 @@ class SessionMemoryStore:
                     "task_code": task_code
                 },
                 "limit": limit,
-                "latest_first": latest_first
+                "latest_first": latest_first,
+                "error": None,
+                "message": None
             }
 
         except Exception as e:
+            logger.error(f"Search failed: {e}", exc_info=True)
             return {
                 "success": False,
+                "results": [],
+                "total_results": 0,
+                "query": query,
+                "filters": {},
+                "limit": limit,
+                "latest_first": latest_first,
                 "error": "Search failed",
                 "message": str(e)
             }
@@ -550,12 +632,10 @@ class SessionMemoryStore:
         Returns:
             Dict with search results at specified granularity
         """
-        # For now, this is a placeholder that calls the filtered search
-        # Full semantic search requires embedding infrastructure
 
         if granularity == "coarse":
-            # Return full documents
-            return self.search_memories(
+            # Return full documents - scoped search without embeddings
+            result = self.search_memories(
                 memory_type=memory_type,
                 agent_id=agent_id,
                 session_id=session_id,
@@ -564,27 +644,252 @@ class SessionMemoryStore:
                 query=query,
                 limit=limit
             )
-        elif granularity == "fine":
-            # Return individual chunks
-            # TODO: Implement chunk-level search
-            return {
-                "success": True,
-                "results": [],
-                "total_results": 0,
-                "granularity": "fine",
-                "message": "Chunk-level search requires embedding infrastructure"
-            }
-        else:  # medium
-            # Return section-level results
-            # TODO: Implement section-level search with auto-merging
-            return {
-                "success": True,
-                "results": [],
-                "total_results": 0,
-                "granularity": "medium",
-                "message": "Section-level search requires embedding infrastructure"
-            }
+            result["granularity"] = "coarse"
+            return result
 
+        elif granularity == "fine":
+            # Return individual chunks using vector search
+            try:
+                # Get embedding model
+                model = self.embedding_model
+                if model is None:
+                    return {
+                        "success": True,
+                        "results": [],
+                        "total_results": 0,
+                        "granularity": "fine",
+                        "message": "Embedding model not available",
+                        "error": None
+                    }
+
+                # Generate query embedding
+                query_embedding = model.encode([query], show_progress_bar=False)[0]
+                query_bytes = query_embedding.tobytes()
+
+                # CRITICAL FIX: sqlite-vec cannot filter with MATCH in WHERE clause
+                # We must get vector results first, then filter in Python
+                # Use larger k to account for post-filtering
+                k_value = limit * 10  # Increased for post-filtering
+
+                # Vector search over chunks - NO metadata filters in WHERE
+                conn = self._get_connection()
+
+                sql = """
+                    SELECT
+                        vc.chunk_id,
+                        mc.parent_id as memory_id,
+                        mc.chunk_index,
+                        mc.content,
+                        mc.chunk_type,
+                        mc.header_path,
+                        mc.level,
+                        distance,
+                        m.memory_type,
+                        m.agent_id,
+                        m.session_id,
+                        m.session_iter,
+                        m.task_code
+                    FROM vec_chunk_search vc
+                    JOIN memory_chunks mc ON vc.chunk_id = mc.id
+                    JOIN session_memories m ON mc.parent_id = m.id
+                    WHERE vc.embedding MATCH ?
+                        AND k = ?
+                    ORDER BY distance
+                """
+
+                params = [query_bytes, k_value]
+                rows = conn.execute(sql, params).fetchall()
+                conn.close()
+
+                # Filter results in Python based on metadata
+                results = []
+                for row in rows:
+                    distance = row[7]
+                    row_memory_type = row[8]
+                    row_agent_id = row[9]
+                    row_session_id = row[10]
+                    row_session_iter = row[11]
+                    row_task_code = row[12]
+
+                    # Apply metadata filters
+                    if row_memory_type != memory_type:
+                        continue
+                    if agent_id and row_agent_id != agent_id:
+                        continue
+                    if session_id and row_session_id != session_id:
+                        continue
+                    if session_iter is not None and row_session_iter != session_iter:
+                        continue
+                    if task_code and row_task_code != task_code:
+                        continue
+
+                    similarity = 1.0 - (distance / 2.0)  # Convert distance to similarity
+
+                    # Apply similarity threshold
+                    if similarity >= similarity_threshold:
+                        results.append({
+                            "chunk_id": row[0],
+                            "memory_id": row[1],
+                            "chunk_index": row[2],
+                            "chunk_content": row[3],
+                            "chunk_type": row[4],
+                            "header_path": row[5],
+                            "level": row[6],
+                            "similarity": float(similarity),
+                            "source": "chunk",
+                            "granularity": "fine"
+                        })
+
+                    if len(results) >= limit:
+                        break
+
+                return {
+                    "success": True,
+                    "results": results,
+                    "total_results": len(results),
+                    "granularity": "fine",
+                    "message": None,
+                    "error": None
+                }
+
+            except Exception as e:
+                logger.error(f"Fine granularity search failed: {e}", exc_info=True)
+                return {
+                    "success": False,
+                    "results": [],
+                    "total_results": 0,
+                    "granularity": "fine",
+                    "message": str(e),
+                    "error": "Search failed"
+                }
+
+        else:  # medium granularity
+            # Return section-level results with auto-merging
+            try:
+                # First do fine search to find matching chunks
+                fine_result = self._search_with_granularity_impl(
+                    memory_type, "fine", query, agent_id, session_id,
+                    session_iter, task_code, limit * 5,  # Get more chunks for section grouping
+                    similarity_threshold, auto_merge_threshold
+                )
+
+                if not fine_result["success"] or not fine_result["results"]:
+                    return {
+                        "success": True,
+                        "results": [],
+                        "total_results": 0,
+                        "granularity": "medium",
+                        "message": fine_result.get("message", "No matching chunks found"),
+                        "error": None
+                    }
+
+                # Group chunks by section (using header_path parent)
+                conn = self._get_connection()
+                sections = {}
+
+                for chunk_result in fine_result["results"]:
+                    memory_id = chunk_result["memory_id"]
+                    header_path = chunk_result["header_path"]
+
+                    # Get section key (parent header, e.g., "## Natural Language Processing")
+                    if not header_path or header_path == "/":
+                        section_key = (memory_id, "/")
+                    else:
+                        # Extract parent section (last level-2 heading or root)
+                        parts = [p.strip() for p in header_path.split(">") if p.strip()]
+                        # Find the highest level heading (usually level 2: ##)
+                        section_key = (memory_id, parts[0] if parts else "/")
+
+                    if section_key not in sections:
+                        sections[section_key] = {
+                            "memory_id": memory_id,
+                            "section_header": section_key[1],
+                            "matching_chunks": [],
+                            "all_chunk_ids": set()
+                        }
+
+                    sections[section_key]["matching_chunks"].append(chunk_result)
+                    sections[section_key]["all_chunk_ids"].add(chunk_result["chunk_id"])
+
+                # For each section, get all chunks and determine if we should merge
+                section_results = []
+
+                for section_key, section_data in sections.items():
+                    memory_id = section_data["memory_id"]
+                    section_header = section_data["section_header"]
+
+                    # Get all chunks in this section
+                    if section_header == "/":
+                        # Root level - get all chunks
+                        section_chunks = conn.execute("""
+                            SELECT id, chunk_index, content, chunk_type, header_path, level
+                            FROM memory_chunks
+                            WHERE parent_id = ?
+                            ORDER BY chunk_index
+                        """, (memory_id,)).fetchall()
+                    else:
+                        # Specific section - get chunks with matching header prefix
+                        section_chunks = conn.execute("""
+                            SELECT id, chunk_index, content, chunk_type, header_path, level
+                            FROM memory_chunks
+                            WHERE parent_id = ?
+                                AND (header_path = ? OR header_path LIKE ?)
+                            ORDER BY chunk_index
+                        """, (memory_id, section_header, f"{section_header} >%")).fetchall()
+
+                    if not section_chunks:
+                        continue
+
+                    # Calculate match ratio
+                    total_chunks = len(section_chunks)
+                    matched_chunks = len(section_data["matching_chunks"])
+                    match_ratio = matched_chunks / total_chunks if total_chunks > 0 else 0
+
+                    # Build section content
+                    section_content = "\n\n".join([chunk[2] for chunk in section_chunks])
+
+                    # Get average similarity of matching chunks
+                    avg_similarity = sum(c["similarity"] for c in section_data["matching_chunks"]) / matched_chunks
+
+                    section_results.append({
+                        "memory_id": memory_id,
+                        "section_header": section_header,
+                        "section_content": section_content,
+                        "header_path": section_header,
+                        "chunks_in_section": total_chunks,
+                        "matched_chunks": matched_chunks,
+                        "match_ratio": float(match_ratio),
+                        "auto_merged": match_ratio >= auto_merge_threshold,
+                        "similarity": float(avg_similarity),
+                        "source": "expanded_section",
+                        "granularity": "medium"
+                    })
+
+                conn.close()
+
+                # Sort by similarity and limit
+                section_results.sort(key=lambda x: x["similarity"], reverse=True)
+                section_results = section_results[:limit]
+
+                return {
+                    "success": True,
+                    "results": section_results,
+                    "total_results": len(section_results),
+                    "granularity": "medium",
+                    "message": None,
+                    "error": None
+                }
+
+            except Exception as e:
+                logger.error(f"Medium granularity search failed: {e}", exc_info=True)
+                return {
+                    "success": False,
+                    "results": [],
+                    "total_results": 0,
+                    "granularity": "medium",
+                    "message": str(e),
+                    "error": "Search failed"
+                }
     def _expand_chunk_context_impl(
         self,
         memory_id: int,
@@ -615,6 +920,12 @@ class SessionMemoryStore:
                 conn.close()
                 return {
                     "success": False,
+                    "memory_id": None,
+                    "target_chunk_index": None,
+                    "context_window": None,
+                    "chunks_returned": None,
+                    "expanded_content": None,
+                    "chunks": None,
                     "error": "Chunk not found",
                     "message": f"No chunk found at index {chunk_index} for memory {memory_id}"
                 }
@@ -653,12 +964,20 @@ class SessionMemoryStore:
                 "context_window": context_window,
                 "chunks_returned": len(all_chunks),
                 "expanded_content": expanded_content,
-                "chunks": all_chunks
+                "chunks": all_chunks,
+                "error": None,
+                "message": None
             }
 
         except Exception as e:
             return {
                 "success": False,
+                "memory_id": None,
+                "target_chunk_index": None,
+                "context_window": None,
+                "chunks_returned": None,
+                "expanded_content": None,
+                "chunks": None,
                 "error": "Context expansion failed",
                 "message": str(e)
             }
@@ -675,16 +994,16 @@ class SessionMemoryStore:
         Args:
             agent_id: Agent identifier
             session_id: Session identifier
-            current_task_code: Current task being worked on
+            current_task_code: Current task code to match
 
         Returns:
-            Dict with session context if task match found
+            Dict with session context if found, empty otherwise
         """
         try:
             conn = self._get_connection()
 
-            # Look for previous session context with matching task_code
-            rows = conn.execute("""
+            # Find latest session_context memory matching agent, session, and task_code
+            row = conn.execute("""
                 SELECT * FROM session_memories
                 WHERE memory_type = 'session_context'
                 AND agent_id = ?
@@ -692,13 +1011,23 @@ class SessionMemoryStore:
                 AND task_code = ?
                 ORDER BY session_iter DESC, created_at DESC
                 LIMIT 1
-            """, (agent_id, session_id, current_task_code)).fetchall()
+            """, (agent_id, session_id, current_task_code)).fetchone()
 
             conn.close()
 
-            if rows:
-                row = rows[0]
-                context = {
+            if not row:
+                return {
+                    "success": True,
+                    "has_context": False,
+                    "context": None,
+                    "message": f"No previous context found for task_code: {current_task_code}",
+                    "error": None
+                }
+
+            return {
+                "success": True,
+                "has_context": True,
+                "context": {
                     "id": row[0],
                     "memory_type": row[1],
                     "agent_id": row[2],
@@ -710,32 +1039,33 @@ class SessionMemoryStore:
                     "description": row[8],
                     "tags": json.loads(row[9]) if row[9] else [],
                     "metadata": json.loads(row[10]) if row[10] else {},
-                    "created_at": row[12]
-                }
-
-                return {
-                    "success": True,
-                    "found_previous_context": True,
-                    "context": context,
-                    "message": f"Found previous context for task: {current_task_code}"
-                }
-            else:
-                return {
-                    "success": True,
-                    "found_previous_context": False,
-                    "context": None,
-                    "message": f"No previous context found for task: {current_task_code}"
-                }
+                    "created_at": row[12],
+                    "updated_at": row[13]
+                },
+                "message": f"Found context for task_code: {current_task_code}",
+                "error": None
+            }
 
         except Exception as e:
+            logger.error(f"Failed to load session context: {e}", exc_info=True)
             return {
                 "success": False,
-                "error": "Context loading failed",
-                "message": str(e)
+                "has_context": False,
+                "context": None,
+                "message": str(e),
+                "error": "Failed to load session context"
             }
 
     def _get_memory_impl(self, memory_id: int) -> dict[str, Any]:
-        """Retrieve specific memory by ID."""
+        """
+        Retrieve specific memory by ID.
+
+        Args:
+            memory_id: Memory identifier
+
+        Returns:
+            Dict with memory details or error
+        """
         try:
             conn = self._get_connection()
 
@@ -748,173 +1078,89 @@ class SessionMemoryStore:
             if not row:
                 return {
                     "success": False,
+                    "memory": None,
                     "error": "Memory not found",
-                    "message": f"No memory found with ID: {memory_id}"
+                    "message": f"No memory with ID: {memory_id}"
                 }
-
-            memory = {
-                "id": row[0],
-                "memory_type": row[1],
-                "agent_id": row[2],
-                "session_id": row[3],
-                "session_iter": row[4],
-                "task_code": row[5],
-                "content": row[6],
-                "title": row[7],
-                "description": row[8],
-                "tags": json.loads(row[9]) if row[9] else [],
-                "metadata": json.loads(row[10]) if row[10] else {},
-                "content_hash": row[11],
-                "created_at": row[12],
-                "updated_at": row[13],
-                "accessed_at": row[14],
-                "access_count": row[15]
-            }
 
             return {
                 "success": True,
-                "memory": memory
+                "memory": {
+                    "id": row[0],
+                    "memory_type": row[1],
+                    "agent_id": row[2],
+                    "session_id": row[3],
+                    "session_iter": row[4],
+                    "task_code": row[5],
+                    "content": row[6],
+                    "title": row[7],
+                    "description": row[8],
+                    "tags": json.loads(row[9]) if row[9] else [],
+                    "metadata": json.loads(row[10]) if row[10] else {},
+                    "content_hash": row[11],
+                    "created_at": row[12],
+                    "updated_at": row[13],
+                    "accessed_at": row[14],
+                    "access_count": row[15]
+                },
+                "error": None,
+                "message": None
             }
 
         except Exception as e:
+            logger.error(f"Failed to get memory: {e}", exc_info=True)
             return {
                 "success": False,
+                "memory": None,
                 "error": "Retrieval failed",
                 "message": str(e)
             }
 
-    def _get_session_stats_impl(
-        self,
-        agent_id: str = None,
-        session_id: str = None
-    ) -> dict[str, Any]:
-        """Get statistics about session memory usage."""
+    def _delete_memory_impl(self, memory_id: int) -> dict[str, Any]:
+        """
+        Delete a memory and all associated data.
+
+        Args:
+            memory_id: Memory identifier
+
+        Returns:
+            Dict with success status
+        """
         try:
             conn = self._get_connection()
 
-            # Build WHERE conditions for filtering
-            where_conditions = []
-            params = []
+            # Check if memory exists
+            row = conn.execute("""
+                SELECT id FROM session_memories WHERE id = ?
+            """, (memory_id,)).fetchone()
 
-            if agent_id:
-                where_conditions.append("agent_id = ?")
-                params.append(agent_id)
-
-            if session_id:
-                where_conditions.append("session_id = ?")
-                params.append(session_id)
-
-            where_clause = "WHERE " + " AND ".join(where_conditions) if where_conditions else ""
-
-            # Get overall stats
-            stats_query = f"""
-                SELECT
-                    COUNT(*) as total_memories,
-                    COUNT(DISTINCT memory_type) as memory_types,
-                    COUNT(DISTINCT agent_id) as unique_agents,
-                    COUNT(DISTINCT session_id) as unique_sessions,
-                    COUNT(DISTINCT task_code) as unique_tasks,
-                    MAX(session_iter) as max_session_iter,
-                    AVG(LENGTH(content)) as avg_content_length,
-                    SUM(access_count) as total_access_count
-                FROM session_memories
-                {where_clause}
-            """
-
-            stats_row = conn.execute(stats_query, params).fetchone()
-
-            # Get memory type breakdown
-            type_query = f"""
-                SELECT memory_type, COUNT(*) as count
-                FROM session_memories
-                {where_clause}
-                GROUP BY memory_type
-                ORDER BY count DESC
-            """
-
-            type_rows = conn.execute(type_query, params).fetchall()
-
-            conn.close()
-
-            return {
-                "success": True,
-                "total_memories": stats_row[0],
-                "memory_types": stats_row[1],
-                "unique_agents": stats_row[2],
-                "unique_sessions": stats_row[3],
-                "unique_tasks": stats_row[4],
-                "max_session_iter": stats_row[5] or 0,
-                "avg_content_length": round(stats_row[6] or 0, 2),
-                "total_access_count": stats_row[7] or 0,
-                "memory_type_breakdown": {row[0]: row[1] for row in type_rows},
-                "filters": {
-                    "agent_id": agent_id,
-                    "session_id": session_id
+            if not row:
+                conn.close()
+                return {
+                    "success": False,
+                    "memory_id": None,
+                    "error": "Memory not found",
+                    "message": f"No memory with ID: {memory_id}"
                 }
-            }
 
-        except Exception as e:
-            return {
-                "success": False,
-                "error": "Stats retrieval failed",
-                "message": str(e)
-            }
-
-    def _list_sessions_impl(
-        self,
-        agent_id: str = None,
-        limit: int = 20
-    ) -> dict[str, Any]:
-        """List recent sessions with basic info."""
-        try:
-            conn = self._get_connection()
-
-            where_clause = "WHERE agent_id = ?" if agent_id else ""
-            params = [agent_id] if agent_id else []
-            params.append(limit)
-
-            rows = conn.execute(f"""
-                SELECT
-                    agent_id,
-                    session_id,
-                    COUNT(*) as memory_count,
-                    MAX(session_iter) as latest_iter,
-                    MAX(created_at) as latest_activity,
-                    MIN(created_at) as first_activity,
-                    GROUP_CONCAT(DISTINCT memory_type) as memory_types
-                FROM session_memories
-                {where_clause}
-                GROUP BY agent_id, session_id
-                ORDER BY latest_activity DESC
-                LIMIT ?
-            """, params).fetchall()
-
+            # Delete (cascades to chunks)
+            conn.execute("DELETE FROM session_memories WHERE id = ?", (memory_id,))
+            conn.commit()
             conn.close()
-
-            sessions = []
-            for row in rows:
-                sessions.append({
-                    "agent_id": row[0],
-                    "session_id": row[1],
-                    "memory_count": row[2],
-                    "latest_iter": row[3],
-                    "latest_activity": row[4],
-                    "first_activity": row[5],
-                    "memory_types": row[6].split(',') if row[6] else []
-                })
 
             return {
                 "success": True,
-                "sessions": sessions,
-                "total_sessions": len(sessions),
-                "agent_filter": agent_id,
-                "limit": limit
+                "memory_id": memory_id,
+                "error": None,
+                "message": f"Memory {memory_id} deleted successfully"
             }
 
         except Exception as e:
+            logger.error(f"Failed to delete memory: {e}", exc_info=True)
             return {
                 "success": False,
-                "error": "Session listing failed",
+                "memory_id": None,
+                "error": "Deletion failed",
                 "message": str(e)
             }
 
@@ -923,32 +1169,33 @@ class SessionMemoryStore:
         Reconstruct a document from its chunks.
 
         Args:
-            memory_id: The ID of the parent memory to reconstruct
+            memory_id: Memory identifier
 
         Returns:
-            Dict with reconstructed content and chunk info
+            Dict with reconstructed content
         """
         try:
             conn = self._get_connection()
 
-            # Get the parent memory
+            # Get parent memory
             parent = conn.execute("""
-                SELECT content, title, memory_type, created_at
-                FROM session_memories
-                WHERE id = ?
+                SELECT content, title, memory_type FROM session_memories WHERE id = ?
             """, (memory_id,)).fetchone()
 
             if not parent:
                 conn.close()
                 return {
                     "success": False,
+                    "memory_id": None,
+                    "content": None,
+                    "title": None,
+                    "memory_type": None,
+                    "chunk_count": 0,
                     "error": "Memory not found",
-                    "message": f"No memory found with ID: {memory_id}"
+                    "message": f"No memory with ID: {memory_id}"
                 }
 
-            # Get all chunks for this memory
-            # CRITICAL FIX: Select original_content (field index will be 23) to get clean content
-            # without metadata headers that were added for embedding purposes
+            # Get chunks
             chunks = conn.execute("""
                 SELECT chunk_index, content, chunk_type, header_path, level, original_content
                 FROM memory_chunks
@@ -967,7 +1214,8 @@ class SessionMemoryStore:
                     "title": parent[1],
                     "memory_type": parent[2],
                     "chunk_count": 0,
-                    "message": "No chunks found, returning original content"
+                    "message": "No chunks found, returning original content",
+                    "error": None
                 }
 
             # Reconstruct from chunks using original_content (index 5) if available,
@@ -987,12 +1235,18 @@ class SessionMemoryStore:
                 "title": parent[1],
                 "memory_type": parent[2],
                 "chunk_count": len(chunks),
-                "message": f"Document reconstructed from {len(chunks)} chunks"
+                "message": f"Document reconstructed from {len(chunks)} chunks",
+                "error": None
             }
 
         except Exception as e:
             return {
                 "success": False,
+                "memory_id": None,
+                "content": None,
+                "title": None,
+                "memory_type": None,
+                "chunk_count": 0,
                 "error": "Reconstruction failed",
                 "message": str(e)
             }
@@ -1005,246 +1259,69 @@ class SessionMemoryStore:
         format: str = "markdown"
     ) -> dict[str, Any]:
         """
-        Write a reconstructed document from memory to disk as a markdown file.
-
-        Use this when documents are too large for MCP response (>20k tokens).
-        After writing, use standard file read operations to access the content.
+        Write a reconstructed document to disk.
 
         Args:
-            memory_id: The ID of the memory to reconstruct and write
-            output_path: Absolute path where to write the file (auto-generated if None)
-            include_metadata: Whether to include YAML frontmatter with metadata
-            format: Output format ("markdown" or "plain")
+            memory_id: Memory identifier
+            output_path: Path to write file (defaults to temp file)
+            include_metadata: Include YAML frontmatter metadata
+            format: Output format (markdown, text)
 
         Returns:
-            Dict with success status and file information
+            Dict with file path and status
         """
         try:
-            # ===== STEP 1: VALIDATE INPUTS =====
-            if memory_id <= 0:
-                return {
-                    "success": False,
-                    "error_code": "INVALID_PARAMETER",
-                    "error_message": "memory_id must be a positive integer",
-                    "memory_id": memory_id
-                }
+            # Reconstruct document
+            doc = self.reconstruct_document(memory_id)
+            if not doc["success"]:
+                return doc
 
-            if format not in ["markdown", "plain"]:
-                return {
-                    "success": False,
-                    "error_code": "INVALID_PARAMETER",
-                    "error_message": "format must be 'markdown' or 'plain'",
-                    "format": format
-                }
-
-            if output_path and not Path(output_path).is_absolute():
-                return {
-                    "success": False,
-                    "error_code": "INVALID_PATH",
-                    "error_message": "output_path must be an absolute path",
-                    "output_path": output_path
-                }
-
-            # ===== STEP 2: FETCH MEMORY FROM DATABASE =====
-            memory_result = self.get_memory(memory_id)
-
-            if not memory_result.get("success"):
-                return {
-                    "success": False,
-                    "error_code": "MEMORY_NOT_FOUND",
-                    "error_message": f"Memory with ID {memory_id} does not exist",
-                    "memory_id": memory_id
-                }
-
-            memory = memory_result["memory"]
-
-            # ===== STEP 3: RECONSTRUCT FULL DOCUMENT =====
-            reconstruct_result = self.reconstruct_document(memory_id)
-
-            if not reconstruct_result.get("success"):
-                return {
-                    "success": False,
-                    "error_code": "RECONSTRUCTION_FAILED",
-                    "error_message": f"Failed to reconstruct document: {reconstruct_result.get('message', 'Unknown error')}",
-                    "memory_id": memory_id
-                }
-
-            full_content = reconstruct_result["content"]
-
-            # ===== STEP 4: ADD METADATA IF REQUESTED =====
-            if include_metadata and YAML_AVAILABLE:
-                # Generate YAML frontmatter
-                frontmatter_data = {
-                    "memory_id": memory["id"],
-                    "title": memory.get("title") or "Untitled Document",
-                    "memory_type": memory.get("memory_type"),
-                    "created_at": memory.get("created_at"),
-                    "updated_at": memory.get("updated_at"),
-                    "session_id": memory.get("session_id"),
-                    "agent_id": memory.get("agent_id"),
-                    "task_code": memory.get("task_code"),
-                    "tags": memory.get("tags", [])
-                }
-
-                # Remove None values
-                frontmatter_data = {k: v for k, v in frontmatter_data.items() if v is not None}
-
-                if memory.get("description"):
-                    frontmatter_data["description"] = memory["description"]
-
-                try:
-                    frontmatter_yaml = yaml.dump(frontmatter_data, default_flow_style=False, sort_keys=False)
-                    frontmatter = f"---\n{frontmatter_yaml}---\n\n"
-                    full_content = frontmatter + full_content
-                except Exception:
-                    # If YAML generation fails, continue without frontmatter
-                    pass
-
-            # ===== STEP 5: DETERMINE OUTPUT PATH =====
+            # Generate output path if not provided
             if output_path is None:
-                # Generate automatic temp path
-                timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
-                filename = f"memory_{memory_id}_{timestamp}.md"
+                import tempfile
+                suffix = ".md" if format == "markdown" else ".txt"
+                fd, output_path = tempfile.mkstemp(suffix=suffix)
+                os.close(fd)
 
-                temp_dir = Path(tempfile.gettempdir()) / "vector_memory"
-                temp_dir.mkdir(parents=True, exist_ok=True)
+            # Build content
+            content_parts = []
 
-                output_path = temp_dir / filename
-            else:
-                output_path = Path(output_path)
-
-                # Validate provided path and create directory if needed
-                try:
-                    output_path.parent.mkdir(parents=True, exist_ok=True)
-                except PermissionError:
-                    return {
-                        "success": False,
-                        "error_code": "PERMISSION_DENIED",
-                        "error_message": f"Cannot create directory: {output_path.parent}",
-                        "output_path": str(output_path)
-                    }
-                except OSError as e:
-                    return {
-                        "success": False,
-                        "error_code": "PERMISSION_DENIED",
-                        "error_message": f"Cannot create directory: {str(e)}",
-                        "output_path": str(output_path)
-                    }
-
-            # ===== STEP 6: WRITE TO FILE =====
-            try:
-                output_path.write_text(full_content, encoding="utf-8")
-            except PermissionError:
-                return {
-                    "success": False,
-                    "error_code": "PERMISSION_DENIED",
-                    "error_message": f"No write permission for path: {output_path}",
-                    "output_path": str(output_path)
+            if include_metadata and format == "markdown":
+                # Add YAML frontmatter
+                metadata = {
+                    "memory_id": memory_id,
+                    "title": doc["title"],
+                    "memory_type": doc["memory_type"],
+                    "chunk_count": doc["chunk_count"]
                 }
-            except OSError as e:
-                if "No space left" in str(e) or "Disk quota exceeded" in str(e):
-                    return {
-                        "success": False,
-                        "error_code": "DISK_FULL",
-                        "error_message": "Insufficient disk space",
-                        "output_path": str(output_path)
-                    }
-                else:
-                    return {
-                        "success": False,
-                        "error_code": "WRITE_FAILED",
-                        "error_message": f"Failed to write file: {str(e)}",
-                        "output_path": str(output_path)
-                    }
-            except Exception as e:
-                return {
-                    "success": False,
-                    "error_code": "WRITE_FAILED",
-                    "error_message": f"Unexpected error writing file: {str(e)}",
-                    "output_path": str(output_path)
-                }
+                if YAML_AVAILABLE:
+                    import yaml
+                    content_parts.append("---")
+                    content_parts.append(yaml.dump(metadata, default_flow_style=False).strip())
+                    content_parts.append("---")
+                    content_parts.append("")
 
-            # ===== STEP 7: GATHER STATISTICS =====
-            file_size_bytes = output_path.stat().st_size
-            file_size_human = self._format_bytes_human_readable(file_size_bytes)
-            estimated_tokens = self._estimate_tokens(full_content)
+            content_parts.append(doc["content"])
 
-            # ===== STEP 8: RETURN SUCCESS =====
+            # Write to file
+            with open(output_path, 'w', encoding='utf-8') as f:
+                f.write('\n'.join(content_parts))
+
             return {
                 "success": True,
-                "file_path": str(output_path.absolute()),
-                "file_size_bytes": file_size_bytes,
-                "file_size_human": file_size_human,
-                "estimated_tokens": estimated_tokens,
+                "file_path": output_path,
                 "memory_id": memory_id,
-                "created_at": datetime.now(timezone.utc).isoformat() + "Z",
-                "message": "Document successfully written to disk"
+                "bytes_written": len('\n'.join(content_parts).encode('utf-8')),
+                "message": f"Document written to {output_path}",
+                "error": None
             }
 
         except Exception as e:
             return {
                 "success": False,
-                "error_code": "WRITE_FAILED",
-                "error_message": f"Unexpected error: {str(e)}",
-                "memory_id": memory_id
-            }
-
-    def _delete_memory_impl(self, memory_id: int) -> dict[str, Any]:
-        """
-        Delete a memory and all associated data.
-
-        Args:
-            memory_id: The ID of the memory to delete
-
-        Returns:
-            Dict with deletion status
-        """
-        try:
-            conn = self._get_connection()
-
-            try:
-                # Check if memory exists
-                existing = conn.execute(
-                    "SELECT memory_type FROM session_memories WHERE id = ?",
-                    (memory_id,)
-                ).fetchone()
-
-                if not existing:
-                    return {
-                        "success": False,
-                        "error": "Memory not found",
-                        "message": f"No memory found with ID: {memory_id}"
-                    }
-
-                # Delete from session_memories (cascades to embeddings, chunks)
-                conn.execute("DELETE FROM session_memories WHERE id = ?", (memory_id,))
-
-                # Delete from vector search index
-                conn.execute("DELETE FROM vec_session_search WHERE memory_id = ?", (memory_id,))
-
-                conn.commit()
-
-                return {
-                    "success": True,
-                    "memory_id": memory_id,
-                    "message": f"Memory {memory_id} and all associated data deleted successfully"
-                }
-
-            except Exception as delete_error:
-                conn.rollback()
-                return {
-                    "success": False,
-                    "error": "Deletion failed",
-                    "message": str(delete_error)
-                }
-
-            finally:
-                # CRITICAL: Always close connection, even if an error occurs
-                conn.close()
-
-        except Exception as e:
-            return {
-                "success": False,
-                "error": "Deletion failed",
+                "file_path": None,
+                "memory_id": None,
+                "bytes_written": 0,
+                "error": "Write failed",
                 "message": str(e)
             }

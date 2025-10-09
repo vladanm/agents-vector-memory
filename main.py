@@ -1,4 +1,4 @@
-#\!/usr/bin/env python3
+#!/usr/bin/env python3
 # /// script
 # requires-python = ">=3.11"
 # dependencies = [
@@ -44,8 +44,43 @@ Legacy mode: Memory files stored in {working_dir}/memory/agent_session_memory.db
 """
 
 import sys
+import logging
 from pathlib import Path
 from typing import Any, Literal
+
+# ==============================================
+# LOGGING CONFIGURATION (MUST BE FIRST)
+# ==============================================
+# Configure comprehensive logging for debugging
+# CRITICAL: MCP stdio protocol REQUIRES that we NEVER write to stderr
+# All logging MUST go to files ONLY
+logs_dir = Path(__file__).parent / "logs"
+logs_dir.mkdir(parents=True, exist_ok=True)
+
+# Configure logging with FILE handler ONLY (no stderr for MCP stdio)
+logging.basicConfig(
+    level=logging.DEBUG,
+    format='%(asctime)s.%(msecs)03d [%(levelname)8s] %(name)s:%(funcName)s:%(lineno)d - %(message)s',
+    datefmt='%Y-%m-%d %H:%M:%S',
+    handlers=[
+        # File handler for persistent logs - THIS IS THE ONLY ALLOWED OUTPUT
+        logging.FileHandler(
+            logs_dir / "mcp_server.log",
+            mode='a',
+            encoding='utf-8'
+        )
+    ]
+)
+
+# Set specific loggers to appropriate levels
+logger = logging.getLogger(__name__)
+logger.setLevel(logging.DEBUG)
+
+# Log the startup
+logger.info("=" * 80)
+logger.info("MCP SERVER STARTUP - Logging initialized")
+logger.info(f"Log file: {logs_dir / 'mcp_server.log'}")
+logger.info("=" * 80)
 
 # Add src to path for imports
 sys.path.insert(0, str(Path(__file__).parent / "src"))
@@ -56,6 +91,7 @@ from mcp.server.fastmcp import FastMCP
 from src.config import Config
 from src.security import validate_working_dir, SecurityError
 from src.session_memory_store import SessionMemoryStore
+from src.stdout_suppressor import suppress_stdout_stderr
 from src.mcp_types import (
     StoreMemoryResult, SearchMemoriesResult, GranularSearchResult,
     GetMemoryResult, ExpandChunkContextResult, LoadSessionContextResult,
@@ -79,752 +115,631 @@ def initialize_store(working_dir: str = None, database_path: str = None) -> None
     """Initialize the session memory store."""
     global store
 
+    logger.info("=" * 80)
+    logger.info("INITIALIZING SESSION MEMORY STORE")
+    logger.info(f"working_dir: {working_dir}")
+    logger.info(f"database_path: {database_path}")
+
     if database_path:
         # Use direct database path (new approach)
         db_path = Path(database_path)
         if not db_path.is_absolute():
-            print(f"Database path must be absolute: {database_path}", file=sys.stderr)
+            logger.error(f"Database path must be absolute: {database_path}")
             sys.exit(1)
 
         # Create parent directories if they don't exist
         db_path.parent.mkdir(parents=True, exist_ok=True)
-        store = SessionMemoryStore(db_path=db_path)
-        print(f"Agent session memory store initialized with direct path: {store.db_path}", file=sys.stderr)
+
+        logger.info(f"Using direct database path: {db_path}")
+        store = SessionMemoryStore(db_path=str(db_path))
 
     elif working_dir:
-        # Use working directory approach (legacy)
+        # Legacy mode using working directory
         try:
-            validated_dir = validate_working_dir(working_dir)
-            config.working_dir = validated_dir
+            base_path = Path(validate_working_dir(working_dir))
         except SecurityError as e:
-            print(f"Security error: {e}", file=sys.stderr)
+            logger.error(f"Security error: {e}")
             sys.exit(1)
 
-        # Initialize store with traditional path
-        db_path = Path(config.working_dir) / "memory" / "agent_session_memory.db"
-        db_path.parent.mkdir(parents=True, exist_ok=True)
-        store = SessionMemoryStore(db_path=db_path)
-        print(f"Agent session memory store initialized with working dir: {store.db_path}", file=sys.stderr)
+        # Memory is stored in a subdirectory under working_dir
+        memory_dir = base_path / "memory"
+        memory_dir.mkdir(parents=True, exist_ok=True)
+
+        db_path = memory_dir / "agent_session_memory.db"
+        logger.info(f"Using legacy working-dir mode: {db_path}")
+        store = SessionMemoryStore(db_path=str(db_path))
 
     else:
-        # Default behavior - use current working directory
-        db_path = Path(config.working_dir) / "memory" / "agent_session_memory.db"
-        db_path.parent.mkdir(parents=True, exist_ok=True)
-        store = SessionMemoryStore(db_path=db_path)
-        print(f"Agent session memory store initialized (default): {store.db_path}", file=sys.stderr)
+        logger.error("Must provide either --database-path or --working-dir")
+        sys.exit(1)
+
+    logger.info(f"✓ Session memory store initialized: {store.db_path}")
+    logger.info("=" * 80)
+
 
 # ======================
-# MAIN AGENT FUNCTIONS
+# MCP TOOL DEFINITIONS
 # ======================
 
 @mcp.tool()
 def store_session_context(
-    agent_id: str,
     session_id: str,
+    session_iter: str,
     content: str,
-    session_iter: int = 1,
-    title: str = None,
-    description: str = None,
-    tags: list[str] = None,
-    metadata: dict = None
+    task_code: str | None = None
 ) -> StoreMemoryResult:
-    """Store agent session snapshots for continuity across iterations.
-
-    Args:
-        agent_id: Agent identifier, e.g. 'main' or 'data-processor'
-        session_id: Session identifier
-        content: Session snapshot content
-        session_iter: Iteration number (1-based)
-        title: Snapshot title
-        description: Brief summary
-        tags: Categorization tags
-        metadata: Additional key-value data
-
-    Returns:
-        Success status and memory details
     """
-    return store.store_memory(
+    Store session context memory (main orchestrator only).
+    Session context represents compressed user input and session state.
+    """
+    result = store.store_memory(
+        agent_id="main-orchestrator",  # Fixed for session context
         memory_type="session_context",
-        agent_id=agent_id,
-        session_id=session_id,
         content=content,
+        session_id=session_id,
         session_iter=session_iter,
-        title=title,
-        description=description,
-        tags=tags or [],
-        metadata=metadata or {}
+        task_code=task_code,
+        metadata={"scope": "session"}
     )
+    return result
+
 
 @mcp.tool()
 def store_input_prompt(
-    agent_id: str,
     session_id: str,
+    session_iter: str,
     content: str,
-    session_iter: int = 1,
-    task_code: str = None,
-    title: str = None,
-    description: str = None,
-    tags: list[str] = None,
-    metadata: dict = None
+    task_code: str | None = None
 ) -> StoreMemoryResult:
-    """Store original prompts to prevent loss during session.
-
-    Args:
-        agent_id: Agent identifier
-        session_id: Session identifier
-        content: Original prompt text
-        session_iter: Iteration number (1-based)
-        task_code: Task identifier for sub-agents
-        title: Prompt title
-        description: Brief summary
-        tags: Categorization tags
-        metadata: Additional key-value data
-
-    Returns:
-        Success status and memory details
     """
-    return store.store_memory(
+    Store original user input prompt to prevent loss.
+    Input prompts are stored verbatim for reference.
+    """
+    result = store.store_memory(
+        agent_id="main-orchestrator",
         memory_type="input_prompt",
-        agent_id=agent_id,
-        session_id=session_id,
         content=content,
+        session_id=session_id,
         session_iter=session_iter,
         task_code=task_code,
-        title=title,
-        description=description,
-        tags=tags or [],
-        metadata=metadata or {}
+        metadata={"scope": "input"}
     )
+    return result
+
 
 @mcp.tool()
 def store_system_memory(
     agent_id: str,
     session_id: str,
     content: str,
-    session_iter: int = 1,
-    task_code: str = None,
-    title: str = None,
-    description: str = None,
-    tags: list[str] = None,
-    metadata: dict = None
+    session_iter: str | None = None,
+    task_code: str | None = None
 ) -> StoreMemoryResult:
-    """Store system info: script paths, endpoints, DB connections.
-
-    Args:
-        agent_id: Agent identifier
-        session_id: Session identifier
-        content: System configuration or command
-        session_iter: Iteration number (1-based)
-        task_code: Task identifier for sub-agents
-        title: System info title
-        description: Brief summary
-        tags: Categorization tags
-        metadata: Additional key-value data
-
-    Returns:
-        Success status and memory details
     """
-    return store.store_memory(
-        memory_type="system_memory",
+    Store system-level memory (configs, commands, scripts).
+    System memory contains technical details for task execution.
+    """
+    result = store.store_memory(
         agent_id=agent_id,
-        session_id=session_id,
+        memory_type="system_memory",
         content=content,
+        session_id=session_id,
         session_iter=session_iter,
         task_code=task_code,
-        title=title,
-        description=description,
-        tags=tags or [],
-        metadata=metadata or {}
+        metadata={"scope": "system"}
     )
+    return result
 
-# ======================
-# SUB-AGENT FUNCTIONS
-# ======================
 
 @mcp.tool()
 def store_report(
     agent_id: str,
     session_id: str,
     content: str,
-    session_iter: int = 1,
-    task_code: str = None,
-    title: str = None,
-    description: str = None,
-    tags: list[str] = None,
-    metadata: dict = None,
-    auto_chunk: bool = True
+    session_iter: str | None = None,
+    task_code: str | None = None
 ) -> StoreMemoryResult:
-    """Store agent reports with automatic chunking for large documents.
-
-    Args:
-        agent_id: Agent identifier
-        session_id: Session identifier
-        content: Report content (markdown recommended)
-        session_iter: Iteration number (1-based)
-        task_code: Task identifier
-        title: Report title
-        description: Brief summary
-        tags: Categorization tags
-        metadata: Additional key-value data
-        auto_chunk: Enable document chunking (default: True)
-
-    Returns:
-        Success status and memory details
     """
-    return store.store_memory(
-        memory_type="reports",
+    Store agent report memory.
+    Reports contain analysis findings and results from agent tasks.
+    """
+    result = store.store_memory(
         agent_id=agent_id,
-        session_id=session_id,
+        memory_type="report",
         content=content,
+        session_id=session_id,
         session_iter=session_iter,
         task_code=task_code,
-        title=title,
-        description=description,
-        tags=tags or [],
-        metadata=metadata or {},
-        auto_chunk=auto_chunk
+        metadata={"scope": "report"}
     )
+    return result
 
-@mcp.tool()
-def store_knowledge_base(
-    agent_id: str,
-    session_id: str,
-    content: str,
-    session_iter: int = 1,
-    task_code: str = None,
-    title: str = None,
-    description: str = None,
-    tags: list[str] = None,
-    metadata: dict = None,
-    auto_chunk: bool = True
-) -> StoreMemoryResult:
-    """Store long-term reference material: documentation, guides, tutorials.
-
-    Args:
-        agent_id: Agent identifier
-        session_id: Session identifier
-        content: Knowledge content (markdown recommended)
-        session_iter: Iteration number (1-based)
-        task_code: Task identifier
-        title: Document title
-        description: Brief summary
-        tags: Categorization tags
-        metadata: Additional key-value data
-        auto_chunk: Enable document chunking (default: True)
-
-    Returns:
-        Success status and memory details
-    """
-    return store.store_memory(
-        memory_type="knowledge_base",
-        agent_id=agent_id,
-        session_id=session_id,
-        content=content,
-        session_iter=session_iter,
-        task_code=task_code,
-        title=title,
-        description=description,
-        tags=tags or [],
-        metadata=metadata or {},
-        auto_chunk=auto_chunk
-    )
 
 @mcp.tool()
 def store_report_observation(
     agent_id: str,
     session_id: str,
     content: str,
-    parent_report_id: int = None,
-    session_iter: int = 1,
-    task_code: str = None,
-    title: str = None,
-    description: str = None,
-    tags: list[str] = None,
-    metadata: dict = None
+    session_iter: str | None = None,
+    task_code: str | None = None
 ) -> StoreMemoryResult:
-    """Store additional notes and observations about existing reports.
-
-    Args:
-        agent_id: Agent identifier
-        session_id: Session identifier
-        content: Observation text
-        parent_report_id: Related report ID
-        session_iter: Iteration number (1-based)
-        task_code: Task identifier
-        title: Observation title
-        description: Brief summary
-        tags: Categorization tags
-        metadata: Additional key-value data
-
-    Returns:
-        Success status and memory details
     """
-    if metadata is None:
-        metadata = {}
-    if parent_report_id:
-        metadata['parent_report_id'] = parent_report_id
-
-    return store.store_memory(
-        memory_type="report_observations",
+    Store additional observations about existing reports.
+    Use this to add notes or updates to previously generated reports.
+    """
+    result = store.store_memory(
         agent_id=agent_id,
-        session_id=session_id,
+        memory_type="report_observation",
         content=content,
+        session_id=session_id,
         session_iter=session_iter,
         task_code=task_code,
-        title=title,
-        description=description,
-        tags=tags or [],
-        metadata=metadata
+        metadata={"scope": "observation"}
     )
+    return result
+
 
 @mcp.tool()
 def store_working_memory(
     agent_id: str,
     session_id: str,
     content: str,
-    session_iter: int = 1,
-    task_code: str = None,
-    title: str = None,
-    description: str = None,
-    tags: list[str] = None,
-    metadata: dict = None,
-    auto_chunk: bool = True
+    session_iter: str | None = None,
+    task_code: str | None = None
 ) -> StoreMemoryResult:
-    """Store important insights during task execution (gotcha moments).
-
-    Args:
-        agent_id: Agent identifier
-        session_id: Session identifier
-        content: Working memory insight
-        session_iter: Iteration number (1-based)
-        task_code: Task identifier
-        title: Memory title
-        description: Brief summary
-        tags: Categorization tags
-        metadata: Additional key-value data
-        auto_chunk: Enable document chunking (default: True)
-
-    Returns:
-        Success status and memory details
     """
-    return store.store_memory(
-        memory_type="working_memory",
+    Store working memory during task execution.
+    Working memory captures important intermediate findings and context.
+    """
+    logger.info(f"[store_working_memory] agent={agent_id}, task={task_code}")
+    result = store.store_memory(
         agent_id=agent_id,
-        session_id=session_id,
+        memory_type="working_memory",
         content=content,
+        session_id=session_id,
         session_iter=session_iter,
         task_code=task_code,
-        title=title,
-        description=description,
-        tags=tags or [],
-        metadata=metadata or {},
-        auto_chunk=auto_chunk
+        metadata={"scope": "working"}
     )
+    return result
+
+
+@mcp.tool()
+def store_knowledge_base(
+    agent_id: str,
+    title: str,
+    content: str,
+    category: str | None = None
+) -> StoreMemoryResult:
+    """
+    Store knowledge base entry (not session-scoped).
+    Knowledge base contains persistent information across sessions.
+    """
+    result = store.store_memory(
+        agent_id=agent_id,
+        memory_type="knowledge_base",
+        content=content,
+        session_id=None,
+        session_iter=None,
+        task_code=None,
+        metadata={"title": title, "category": category or "general"}
+    )
+    return result
+
 
 # ======================
-# SEARCH FUNCTIONS WITH SCOPING
+# SEARCH FUNCTIONS (CONSOLIDATED WITH GRANULARITY)
 # ======================
 
 @mcp.tool()
 def search_session_context(
-    agent_id: str = None,
-    session_id: str = None,
-    session_iter: int = None,
-    query: str = None,
-    limit: int = 3,
-    latest_first: bool = True
+    session_id: str,
+    session_iter: str | None = None,
+    limit: int = 5
 ) -> SearchMemoriesResult:
-    """Search session snapshots with filtering. Returns ordered by session_iter DESC, created_at DESC.
-
-    Args:
-        agent_id: Filter by agent
-        session_id: Filter by session
-        session_iter: Filter by iteration
-        query: Semantic search text
-        limit: Max results (1-100)
-        latest_first: Sort newest first (default: True)
-
-    Returns:
-        Search results with metadata
     """
-    # Note: search_memories() performs scoped/filtered searches, not semantic search
-    # For semantic search with similarity thresholds, use search_with_granularity()
-    return store.search_memories(
+    Search session context memories (main orchestrator).
+    Returns session context snapshots for continuity.
+    """
+    result = store.search_memories(
+        agent_id="main-orchestrator",
         memory_type="session_context",
-        agent_id=agent_id,
+        query=None,
         session_id=session_id,
         session_iter=session_iter,
-        query=query,
-        limit=limit,
-        latest_first=latest_first
+        limit=limit
     )
+    return result
 
-@mcp.tool()
-def search_system_memory(
-    agent_id: str = None,
-    session_id: str = None,
-    session_iter: int = None,
-    task_code: str = None,
-    query: str = None,
-    limit: int = 3,
-    latest_first: bool = True
-) -> SearchMemoriesResult:
-    """Search system configurations with filtering. Returns ordered by session_iter DESC, created_at DESC.
-
-    Args:
-        agent_id: Filter by agent
-        session_id: Filter by session
-        session_iter: Filter by iteration
-        task_code: Filter by task
-        query: Semantic search text
-        limit: Max results (1-100)
-        latest_first: Sort newest first (default: True)
-
-    Returns:
-        Search results with metadata
-    """
-    # Note: search_memories() performs scoped/filtered searches, not semantic search
-    # For semantic search with similarity thresholds, use search_with_granularity()
-    return store.search_memories(
-        memory_type="system_memory",
-        agent_id=agent_id,
-        session_id=session_id,
-        session_iter=session_iter,
-        task_code=task_code,
-        query=query,
-        limit=limit,
-        latest_first=latest_first
-    )
 
 @mcp.tool()
 def search_input_prompts(
-    agent_id: str = None,
-    session_id: str = None,
-    session_iter: int = None,
-    task_code: str = None,
-    query: str = None,
-    limit: int = 3,
-    latest_first: bool = True
+    session_id: str,
+    session_iter: str | None = None,
+    limit: int = 5
 ) -> SearchMemoriesResult:
-    """Search stored prompts with filtering. Returns ordered by session_iter DESC, created_at DESC.
-
-    Args:
-        agent_id: Filter by agent
-        session_id: Filter by session
-        session_iter: Filter by iteration
-        task_code: Filter by task
-        query: Semantic search text
-        limit: Max results (1-100)
-        latest_first: Sort newest first (default: True)
-
-    Returns:
-        Search results with metadata
     """
-    # Note: search_memories() performs scoped/filtered searches, not semantic search
-    # For semantic search with similarity thresholds, use search_with_granularity()
-    return store.search_memories(
+    Search input prompt memories.
+    Returns original user prompts for reference.
+    """
+    result = store.search_memories(
+        agent_id="main-orchestrator",
         memory_type="input_prompt",
+        query=None,
+        session_id=session_id,
+        session_iter=session_iter,
+        limit=limit
+    )
+    return result
+
+
+@mcp.tool()
+def search_system_memory(
+    query: str,
+    agent_id: str | None = None,
+    session_id: str | None = None,
+    session_iter: str | None = None,
+    task_code: str | None = None,
+    limit: int = 10
+) -> SearchMemoriesResult:
+    """
+    Search system memory (configs, commands, scripts).
+    Semantic search across technical system information.
+    """
+    result = store.search_memories(
+        agent_id=agent_id,
+        memory_type="system_memory",
+        query=query,
+        session_id=session_id,
+        session_iter=session_iter,
+        task_code=task_code,
+        limit=limit
+    )
+    return result
+
+
+@mcp.tool()
+def search_reports_specific_chunks(
+    query: str,
+    agent_id: str | None = None,
+    session_id: str | None = None,
+    session_iter: str | None = None,
+    task_code: str | None = None,
+    limit: int = 10
+) -> GranularSearchResult:
+    """
+    Search reports at FINE granularity (specific chunks).
+    Returns precise chunk-level matches with surrounding context.
+    Use when you need specific details or exact information.
+    """
+    result = store.search_with_granularity(
+        query=query,
+        memory_type="report",
+        granularity="fine",
         agent_id=agent_id,
         session_id=session_id,
         session_iter=session_iter,
         task_code=task_code,
-        query=query,
-        limit=limit,
-        latest_first=latest_first
+        limit=limit
     )
+    return result
 
-# ======================
-# CONDITIONAL LOADING FOR TASK CONTINUITY
-# ======================
 
 @mcp.tool()
-def load_session_context_for_task(
-    agent_id: str,
-    session_id: str,
-    current_task_code: str
-) -> LoadSessionContextResult:
-    """Load session context only if agent worked on same task before. Used for task continuity.
-
-    Args:
-        agent_id: Agent identifier
-        session_id: Session identifier
-        current_task_code: Current task code
-
-    Returns:
-        Session context if match found, empty otherwise
+def search_reports_section_context(
+    query: str,
+    agent_id: str | None = None,
+    session_id: str | None = None,
+    session_iter: str | None = None,
+    task_code: str | None = None,
+    limit: int = 5
+) -> GranularSearchResult:
     """
-    return store.load_session_context_for_task(agent_id, session_id, current_task_code)
+    Search reports at MEDIUM granularity (section context).
+    Returns chunks with expanded context (3 chunks before/after).
+    Use for understanding the context around specific findings.
+    """
+    result = store.search_with_granularity(
+        query=query,
+        memory_type="report",
+        granularity="medium",
+        agent_id=agent_id,
+        session_id=session_id,
+        session_iter=session_iter,
+        task_code=task_code,
+        limit=limit
+    )
+    return result
+
+
+@mcp.tool()
+def search_reports_full_documents(
+    query: str,
+    agent_id: str | None = None,
+    session_id: str | None = None,
+    session_iter: str | None = None,
+    task_code: str | None = None,
+    limit: int = 3
+) -> GranularSearchResult:
+    """
+    Search reports at COARSE granularity (full documents).
+    Returns complete documents that match the query.
+    Use for comprehensive overview or when document structure matters.
+    """
+    result = store.search_with_granularity(
+        query=query,
+        memory_type="report",
+        granularity="coarse",
+        agent_id=agent_id,
+        session_id=session_id,
+        session_iter=session_iter,
+        task_code=task_code,
+        limit=limit
+    )
+    return result
+
+
+@mcp.tool()
+def search_working_memory_specific_chunks(
+    query: str,
+    agent_id: str | None = None,
+    session_id: str | None = None,
+    session_iter: str | None = None,
+    task_code: str | None = None,
+    limit: int = 10
+) -> GranularSearchResult:
+    """
+    Search working memory at FINE granularity (specific chunks).
+    Returns precise matches in working memory.
+    """
+    result = store.search_with_granularity(
+        query=query,
+        memory_type="working_memory",
+        granularity="fine",
+        agent_id=agent_id,
+        session_id=session_id,
+        session_iter=session_iter,
+        task_code=task_code,
+        limit=limit
+    )
+    return result
+
+
+@mcp.tool()
+def search_working_memory_section_context(
+    query: str,
+    agent_id: str | None = None,
+    session_id: str | None = None,
+    session_iter: str | None = None,
+    task_code: str | None = None,
+    limit: int = 5
+) -> GranularSearchResult:
+    """
+    Search working memory at MEDIUM granularity (section context).
+    Returns working memory chunks with surrounding context.
+    """
+    result = store.search_with_granularity(
+        query=query,
+        memory_type="working_memory",
+        granularity="medium",
+        agent_id=agent_id,
+        session_id=session_id,
+        session_iter=session_iter,
+        task_code=task_code,
+        limit=limit
+    )
+    return result
+
+
+@mcp.tool()
+def search_working_memory_full_documents(
+    query: str,
+    agent_id: str | None = None,
+    session_id: str | None = None,
+    session_iter: str | None = None,
+    task_code: str | None = None,
+    limit: int = 3
+) -> GranularSearchResult:
+    """
+    Search working memory at COARSE granularity (full documents).
+    Returns complete working memory documents.
+    """
+    result = store.search_with_granularity(
+        query=query,
+        memory_type="working_memory",
+        granularity="coarse",
+        agent_id=agent_id,
+        session_id=session_id,
+        session_iter=session_iter,
+        task_code=task_code,
+        limit=limit
+    )
+    return result
+
+
+@mcp.tool()
+def search_knowledge_base_specific_chunks(
+    query: str,
+    agent_id: str | None = None,
+    category: str | None = None,
+    limit: int = 10
+) -> GranularSearchResult:
+    """
+    Search knowledge base at FINE granularity (specific chunks).
+    Returns precise matches in knowledge base entries.
+    """
+    result = store.search_with_granularity(
+        query=query,
+        memory_type="knowledge_base",
+        granularity="fine",
+        agent_id=agent_id,
+        limit=limit
+    )
+    return result
+
+
+@mcp.tool()
+def search_knowledge_base_section_context(
+    query: str,
+    agent_id: str | None = None,
+    category: str | None = None,
+    limit: int = 5
+) -> GranularSearchResult:
+    """
+    Search knowledge base at MEDIUM granularity (section context).
+    Returns knowledge base chunks with surrounding context.
+    """
+    result = store.search_with_granularity(
+        query=query,
+        memory_type="knowledge_base",
+        granularity="medium",
+        agent_id=agent_id,
+        limit=limit
+    )
+    return result
+
+
+@mcp.tool()
+def search_knowledge_base_full_documents(
+    query: str,
+    agent_id: str | None = None,
+    category: str | None = None,
+    limit: int = 3
+) -> GranularSearchResult:
+    """
+    Search knowledge base at COARSE granularity (full documents).
+    Returns complete knowledge base documents.
+    """
+    result = store.search_with_granularity(
+        query=query,
+        memory_type="knowledge_base",
+        granularity="coarse",
+        agent_id=agent_id,
+        limit=limit
+    )
+    return result
+
 
 # ======================
 # UTILITY FUNCTIONS
 # ======================
 
 @mcp.tool()
-def get_memory_by_id(memory_id: int) -> GetMemoryResult:
-    """Retrieve memory by ID with complete details.
-
-    Args:
-        memory_id: Memory identifier
-
-    Returns:
-        Memory details or error
+def load_session_context_for_task(
+    session_id: str,
+    session_iter: str
+) -> LoadSessionContextResult:
     """
-    return store.get_memory(memory_id)
-
-@mcp.tool()
-def get_session_stats(
-    agent_id: str = None,
-    session_id: str = None
-) -> SessionStatsResult:
-    """Get memory usage statistics for sessions.
-
-    Args:
-        agent_id: Filter by agent
-        session_id: Filter by session
-
-    Returns:
-        Usage statistics
+    Load all relevant session context for task continuation.
+    Returns session context, input prompts, and recent activity.
     """
-    return store.get_session_stats(agent_id, session_id)
-
-@mcp.tool()
-def list_sessions(
-    agent_id: str = None,
-    limit: int = 20
-) -> ListSessionsResult:
-    """List recent sessions with basic information.
-
-    Args:
-        agent_id: Filter by agent
-        limit: Max sessions (1-100)
-
-    Returns:
-        Session list with metadata
-    """
-    return store.list_sessions(agent_id, limit)
-
-@mcp.tool()
-def delete_memory(memory_id: int) -> DeleteMemoryResult:
-    """Delete memory and all associated data (embeddings, chunks).
-
-    Args:
-        memory_id: Memory identifier
-
-    Returns:
-        Deletion status
-    """
-    return store.delete_memory(memory_id)
-
-@mcp.tool()
-def cleanup_old_memories(
-    older_than_days: int = 30,
-    memory_type: str = None
-) -> CleanupMemoriesResult:
-    """Delete memories older than specified days.
-
-    Args:
-        older_than_days: Age threshold in days (default: 30)
-        memory_type: Filter by type, e.g. 'reports'
-
-    Returns:
-        Cleanup statistics
-    """
-    return store.cleanup_old_memories(older_than_days, memory_type)
-
-@mcp.tool()
-def reconstruct_document(memory_id: int) -> ReconstructDocumentResult:
-    """Reconstruct complete document from stored chunks.
-
-    Args:
-        memory_id: Parent memory identifier
-
-    Returns:
-        Reconstructed content and chunk info
-    """
-    return store.reconstruct_document(memory_id)
-
-@mcp.tool()
-def write_document_to_file(
-    memory_id: int,
-    output_path: str = None,
-    include_metadata: bool = True,
-    format: str = "markdown"
-) -> WriteDocumentResult:
-    """Write reconstructed document to disk. Use for large documents (>20k tokens).
-
-    Args:
-        memory_id: Memory identifier
-        output_path: Absolute file path (auto-generated if omitted)
-        include_metadata: Add YAML frontmatter (default: True)
-        format: Output format: 'markdown' or 'plain' (default: 'markdown')
-
-    Returns:
-        Status, file_path, file_size, estimated_tokens
-    """
-    return store.write_document_to_file(memory_id, output_path, include_metadata, format)
-
-# ================================
-# CONSOLIDATED THREE-TIER GRANULARITY SEARCH
-# ================================
-
-@mcp.tool()
-def search_knowledge_base(
-    query: str,
-    granularity: Literal["specific_chunks", "section_context", "full_documents"] = "full_documents",
-    agent_id: str = None,
-    session_id: str = None,
-    session_iter: int = None,
-    task_code: str = None,
-    limit: int = 3,
-    similarity_threshold: float = 0.7,
-    auto_merge_threshold: float = 0.6
-) -> GranularSearchResult:
-    """Search knowledge base with configurable granularity.
-
-    Args:
-        query: Semantic search text
-        granularity: Search granularity level
-            - 'specific_chunks': Fine-grained (<400 tokens) for pinpoint queries, specific details, code snippets, definitions
-            - 'section_context': Medium-grained (400-1200 tokens) for section-level understanding, concepts, procedures. Auto-merges when ≥60% siblings match
-            - 'full_documents': Coarse-grained (full docs) for discovery, overviews, broad context. Docs: <5k (small), 5-50k (medium), 50k+ (large) tokens
-        agent_id: Filter by agent
-        session_id: Filter by session
-        session_iter: Filter by iteration
-        task_code: Filter by task
-        limit: Max results (1-100)
-        similarity_threshold: Min similarity 0.0-1.0 (default: 0.7)
-        auto_merge_threshold: Merge if ≥X siblings match (default: 0.6, applies to section_context)
-
-    Returns:
-        Search results at specified granularity. Source and granularity indicated in response.
-        - specific_chunks: Chunk content, indices, header path, score. Source: 'chunk', granularity: 'fine'
-        - section_context: Section content, header path, match stats, merge flag. Source: 'expanded_section', granularity: 'medium'
-        - full_documents: Full content, title, description, tags. Source: 'document', granularity: 'coarse'
-    """
-    return store.search_with_granularity(
-        query=query,
-        memory_type="knowledge_base",
-        granularity=GRANULARITY_MAP[granularity],
-        agent_id=agent_id,
+    result = store.load_session_context(
         session_id=session_id,
-        session_iter=session_iter,
-        task_code=task_code,
-        limit=limit,
-        similarity_threshold=similarity_threshold,
-        auto_merge_threshold=auto_merge_threshold
+        session_iter=session_iter
     )
+    return result
 
-@mcp.tool()
-def search_reports(
-    query: str,
-    granularity: Literal["specific_chunks", "section_context", "full_documents"] = "full_documents",
-    agent_id: str = None,
-    session_id: str = None,
-    session_iter: int = None,
-    task_code: str = None,
-    limit: int = 3,
-    similarity_threshold: float = 0.7,
-    auto_merge_threshold: float = 0.6
-) -> GranularSearchResult:
-    """Search agent reports with configurable granularity.
-
-    Args:
-        query: Semantic search text
-        granularity: Search granularity level
-            - 'specific_chunks': Fine-grained (<400 tokens) for specific findings, data points, precise details
-            - 'section_context': Medium-grained (400-1200 tokens) for section-level analysis, grouped findings, context. Auto-merges when ≥60% siblings match
-            - 'full_documents': Coarse-grained (full docs) for report discovery, summaries, full context. Docs: <5k (small), 5-50k (medium), 50k+ (large) tokens
-        agent_id: Filter by agent
-        session_id: Filter by session
-        session_iter: Filter by iteration
-        task_code: Filter by task
-        limit: Max results (1-100)
-        similarity_threshold: Min similarity 0.0-1.0 (default: 0.7)
-        auto_merge_threshold: Merge if ≥X siblings match (default: 0.6, applies to section_context)
-
-    Returns:
-        Search results at specified granularity. Source and granularity indicated in response.
-        - specific_chunks: Chunk content, indices, header path, score. Source: 'chunk', granularity: 'fine'
-        - section_context: Section content, header path, match stats, merge flag. Source: 'expanded_section', granularity: 'medium'
-        - full_documents: Full content, title, description, tags. Source: 'document', granularity: 'coarse'
-    """
-    return store.search_with_granularity(
-        query=query,
-        memory_type="reports",
-        granularity=GRANULARITY_MAP[granularity],
-        agent_id=agent_id,
-        session_id=session_id,
-        session_iter=session_iter,
-        task_code=task_code,
-        limit=limit,
-        similarity_threshold=similarity_threshold,
-        auto_merge_threshold=auto_merge_threshold
-    )
-
-@mcp.tool()
-def search_working_memory(
-    query: str,
-    granularity: Literal["specific_chunks", "section_context", "full_documents"] = "full_documents",
-    agent_id: str = None,
-    session_id: str = None,
-    session_iter: int = None,
-    task_code: str = None,
-    limit: int = 3,
-    similarity_threshold: float = 0.7,
-    auto_merge_threshold: float = 0.6
-) -> GranularSearchResult:
-    """Search working memory (insights, gotcha moments) with configurable granularity.
-
-    Args:
-        query: Semantic search text
-        granularity: Search granularity level
-            - 'specific_chunks': Fine-grained (<400 tokens) for specific insights, gotcha moments, precise details
-            - 'section_context': Medium-grained (400-1200 tokens) for section-level understanding, grouped insights, context. Auto-merges when ≥60% siblings match
-            - 'full_documents': Coarse-grained (full docs) for complete memory discovery, full context of insights. Docs: <5k (small), 5-50k (medium), 50k+ (large) tokens
-        agent_id: Filter by agent
-        session_id: Filter by session
-        session_iter: Filter by iteration
-        task_code: Filter by task
-        limit: Max results (1-100)
-        similarity_threshold: Min similarity 0.0-1.0 (default: 0.7)
-        auto_merge_threshold: Merge if ≥X siblings match (default: 0.6, applies to section_context)
-
-    Returns:
-        Search results at specified granularity. Source and granularity indicated in response.
-        - specific_chunks: Chunk content, indices, header path, score. Source: 'chunk', granularity: 'fine'
-        - section_context: Section content, header path, match stats, merge flag. Source: 'expanded_section', granularity: 'medium'
-        - full_documents: Full content, title, description, tags. Source: 'document', granularity: 'coarse'
-    """
-    return store.search_with_granularity(
-        query=query,
-        memory_type="working_memory",
-        granularity=GRANULARITY_MAP[granularity],
-        agent_id=agent_id,
-        session_id=session_id,
-        session_iter=session_iter,
-        task_code=task_code,
-        limit=limit,
-        similarity_threshold=similarity_threshold,
-        auto_merge_threshold=auto_merge_threshold
-    )
 
 @mcp.tool()
 def expand_chunk_context(
-    memory_id: int,
-    chunk_index: int,
-    context_window: int = 2
+    chunk_id: str,
+    surrounding_chunks: int = 2
 ) -> ExpandChunkContextResult:
-    """Retrieve chunk with surrounding siblings. Universal tool for any granularity level.
-
-    Args:
-        memory_id: Parent memory identifier
-        chunk_index: Target chunk index
-        context_window: Chunks before/after (default: 2)
-
-    Returns:
-        Target chunk, previous/next chunks, expanded content
     """
-    return store.expand_chunk_context(memory_id, chunk_index, context_window)
+    Expand context around a specific chunk.
+    Returns the chunk with surrounding chunks for better understanding.
+    """
+    result = store.expand_chunk_context(
+        chunk_id=chunk_id,
+        surrounding_chunks=surrounding_chunks
+    )
+    return result
+
+
+@mcp.tool()
+def reconstruct_document(memory_id: str) -> ReconstructDocumentResult:
+    """
+    Reconstruct the full document from a memory_id by retrieving all its chunks.
+    Returns the complete original document.
+    """
+    result = store.reconstruct_document(memory_id=memory_id)
+    return result
+
+
+@mcp.tool()
+def get_memory_by_id(memory_id: str) -> GetMemoryResult:
+    """
+    Get a specific memory by its ID.
+    Returns complete memory record with metadata.
+    """
+    result = store.get_memory_by_id(memory_id=memory_id)
+    return result
+
+
+@mcp.tool()
+def get_session_stats(session_id: str) -> SessionStatsResult:
+    """
+    Get statistics for a session.
+    Returns counts by memory type and agent.
+    """
+    result = store.get_session_stats(session_id=session_id)
+    return result
+
+
+@mcp.tool()
+def list_sessions(
+    limit: int = 20,
+    agent_id: str | None = None
+) -> ListSessionsResult:
+    """
+    List recent sessions with activity counts.
+    Returns session metadata ordered by most recent first.
+    """
+    result = store.list_sessions(limit=limit, agent_id=agent_id)
+    return result
+
+
+@mcp.tool()
+def write_document_to_file(
+    memory_id: str,
+    output_path: str
+) -> WriteDocumentResult:
+    """
+    Write a reconstructed document to a file.
+    Use this for large documents that exceed token limits.
+    """
+    result = store.write_document_to_file(
+        memory_id=memory_id,
+        output_path=output_path
+    )
+    return result
+
+
+@mcp.tool()
+def delete_memory(memory_id: str) -> DeleteMemoryResult:
+    """
+    Delete a memory and all its chunks.
+    Use with caution - this cannot be undone.
+    """
+    result = store.delete_memory(memory_id=memory_id)
+    return result
+
+
+@mcp.tool()
+def cleanup_old_memories(
+    days_old: int = 90,
+    dry_run: bool = True
+) -> CleanupMemoriesResult:
+    """
+    Clean up memories older than specified days.
+    Set dry_run=False to actually delete (default is dry_run=True).
+    """
+    result = store.cleanup_old_memories(
+        days_old=days_old,
+        dry_run=dry_run
+    )
+    return result
+
 
 # ======================
 # SERVER INITIALIZATION
@@ -832,10 +747,11 @@ def expand_chunk_context(
 
 if __name__ == "__main__":
     import argparse
+    import time
 
-    print("🤖 AGENT SESSION MEMORY MCP SERVER STARTING", file=sys.stderr)
-    print(f"📁 File: {__file__}", file=sys.stderr)
-    print("🎯 Specialized for agent session management with proper scoping", file=sys.stderr)
+    logger.info("🤖 AGENT SESSION MEMORY MCP SERVER STARTING")
+    logger.info(f"📁 File: {__file__}")
+    logger.info("🎯 Specialized for agent session management with proper scoping")
 
     parser = argparse.ArgumentParser(description="Agent Session Memory MCP Server")
     parser.add_argument("--working-dir", help="Working directory for memory files (legacy)")
@@ -846,19 +762,54 @@ if __name__ == "__main__":
         # Initialize store with database path or working directory
         initialize_store(working_dir=args.working_dir, database_path=args.database_path)
 
-        # Log to stderr (stdout is reserved for MCP protocol)
-        print("🔧 Available session-centric functions:", file=sys.stderr)
-        print("   📝 Storage: store_session_context, store_input_prompt, store_system_memory", file=sys.stderr)
-        print("   📊 Reports: store_report, store_report_observation, store_working_memory", file=sys.stderr)
-        print("   🔍 Search: Consolidated 3-function search with granularity parameter", file=sys.stderr)
-        print("   🔄 Continuity: load_session_context_for_task", file=sys.stderr)
-        print("   📈 Stats: get_session_stats, list_sessions", file=sys.stderr)
-        print("   💾 Document Export: write_document_to_file (for large documents)", file=sys.stderr)
-        print("⚡ Proper ordering: session_iter DESC, created_at DESC", file=sys.stderr)
+        # ========================================
+        # SYNCHRONOUS EMBEDDING MODEL WARMUP
+        # ========================================
+        # CRITICAL FIX: Load embedding model BEFORE starting MCP server
+        # Previous approach used background thread which redirected stdout to /dev/null
+        # This broke MCP stdio protocol since file descriptors are process-wide
+        logger.info("=" * 80)
+        logger.info("🔧 EMBEDDING MODEL WARMUP (SYNCHRONOUS)")
+        logger.info("   Purpose: Prevent timeout on first memory storage call")
+        logger.info("   Context: Model loading takes 5-7s")
+        logger.info("   CRITICAL: Must complete BEFORE starting MCP server")
+        logger.info("   Reason: Background thread stdout suppression breaks MCP stdio")
 
-        # Run the MCP server
+        try:
+            warmup_start = time.time()
+            # Trigger model load with a dummy encoding
+            # Suppress stdout to prevent model init messages from corrupting MCP protocol
+            with suppress_stdout_stderr():
+                _ = store.embedding_model.encode(
+                    ["Warmup text for model initialization"],
+                    show_progress_bar=False
+                )
+            warmup_elapsed = time.time() - warmup_start
+            logger.info(f"✓ Embedding model warmed up in {warmup_elapsed:.2f}s")
+            logger.info(f"   Memory operations will now be fast (<2 seconds)")
+        except Exception as e:
+            logger.warning("=" * 80)
+            logger.warning(f"⚠ EMBEDDING MODEL WARMUP FAILED: {e}")
+            logger.warning("   First memory storage call may take longer (7+ seconds)")
+            logger.warning("=" * 80)
+        logger.info("=" * 80)
+
+        # Log to file (stdout/stderr are reserved for MCP protocol)
+        logger.info("🔧 Available session-centric functions:")
+        logger.info("   📝 Storage: store_session_context, store_input_prompt, store_system_memory")
+        logger.info("   📊 Reports: store_report, store_report_observation, store_working_memory")
+        logger.info("   🔍 Search: Consolidated 3-function search with granularity parameter")
+        logger.info("   🔄 Continuity: load_session_context_for_task")
+        logger.info("   📈 Stats: get_session_stats, list_sessions")
+        logger.info("   💾 Document Export: write_document_to_file (for large documents)")
+        logger.info("⚡ Proper ordering: session_iter DESC, created_at DESC")
+
+        logger.info("🚀 Starting MCP server event loop...")
+        logger.info("   Embedding model already loaded - ready for immediate use")
+
+        # Run the MCP server - model is already warmed up
         mcp.run()
 
     except Exception as e:
-        print(f"Server error: {e}", file=sys.stderr)
+        logger.critical(f"SERVER STARTUP FAILED: {e}", exc_info=True)
         raise

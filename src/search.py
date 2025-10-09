@@ -45,7 +45,7 @@ class SearchOperations:
         session_iter: int | None = None,
         task_code: str | None = None,
         limit: int = 3,
-        similarity_threshold: float = 0.7,
+        similarity_threshold: float = 0.5,
         auto_merge_threshold: float = 0.6
     ) -> dict[str, Any]:
         """Search with specific granularity level."""

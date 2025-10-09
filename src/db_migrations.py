@@ -191,3 +191,14 @@ def run_migrations(db_path: str) -> None:
         raise RuntimeError(f"Failed to run migrations: {e}")
     finally:
         conn.close()
+
+
+# Alias for backwards compatibility
+def ensure_schema_up_to_date(db_path: str) -> None:
+    """
+    Ensure database schema is current. Alias for run_migrations().
+
+    Args:
+        db_path: Path to SQLite database file
+    """
+    run_migrations(db_path)

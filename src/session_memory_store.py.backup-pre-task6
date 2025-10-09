@@ -335,7 +335,7 @@ class SessionMemoryStore:
 
             # Determine if we should chunk (default based on memory type)
             if auto_chunk is None:
-                auto_chunk = config.get('auto_chunk', False)
+                auto_chunk = config.get('default_auto_chunk', False)
 
             # Generate content hash
             content_hash = hashlib.sha256(content.encode()).hexdigest()
@@ -596,6 +596,137 @@ class SessionMemoryStore:
                 "message": str(e)
             }
 
+    # ======================
+    # TASK 2: ITERATIVE POST-FILTER FETCHING HELPER METHODS
+    # ======================
+
+    def _passes_metadata_filters(self, row: tuple, filters: dict) -> bool:
+        """
+        Check if row passes all metadata filters.
+
+        Args:
+            row: Database row tuple
+            filters: Dict with memory_type, agent_id, session_id, session_iter, task_code
+
+        Returns:
+            True if row passes all filters, False otherwise
+        """
+        # row indices: [8]=memory_type, [9]=agent_id, [10]=session_id, [11]=session_iter, [12]=task_code
+
+        if filters.get("memory_type") and row[8] != filters["memory_type"]:
+            return False
+        if filters.get("agent_id") and row[9] != filters["agent_id"]:
+            return False
+        if filters.get("session_id") and row[10] != filters["session_id"]:
+            return False
+        if filters.get("session_iter") is not None and row[11] != filters["session_iter"]:
+            return False
+        if filters.get("task_code") and row[12] != filters["task_code"]:
+            return False
+
+        return True
+
+    def _iterative_vector_search(
+        self,
+        conn: sqlite3.Connection,
+        query_bytes: bytes,
+        limit: int,
+        metadata_filters: dict
+    ) -> list:
+        """
+        Iteratively fetch vector results until enough pass metadata filters.
+
+        This solves the "250→3 after filters" starvation problem by continuing
+        to fetch batches until we have enough filtered results.
+
+        Args:
+            conn: Database connection
+            query_bytes: Query embedding as bytes
+            limit: Target number of results after filtering
+            metadata_filters: Dict with memory_type, agent_id, session_id, etc.
+
+        Returns:
+            List of filtered results (sorted by distance)
+        """
+        want = limit
+        batch_size = max(100, limit * 50)  # Start large for low selectivity
+        offset = 0
+        kept = []
+        max_offset = 1_000_000  # Safety limit to prevent infinite loops
+
+        logger.info(f"Starting iterative search: want={want}, initial_batch={batch_size}")
+
+        while len(kept) < want and offset < max_offset:
+            # Fetch next batch (no metadata filters in SQL - sqlite-vec limitation)
+            sql = """
+                SELECT
+                    vc.chunk_id,
+                    mc.parent_id as memory_id,
+                    mc.chunk_index,
+                    mc.content,
+                    mc.chunk_type,
+                    mc.header_path,
+                    mc.level,
+                    distance,
+                    m.memory_type,
+                    m.agent_id,
+                    m.session_id,
+                    m.session_iter,
+                    m.task_code
+                FROM vec_chunk_search vc
+                JOIN memory_chunks mc ON vc.chunk_id = mc.id
+                JOIN session_memories m ON mc.parent_id = m.id
+                WHERE vc.embedding MATCH ?
+                    AND k = ?
+                ORDER BY distance
+                LIMIT ? OFFSET ?
+            """
+
+            rows = conn.execute(sql, [query_bytes, batch_size + offset, batch_size, offset]).fetchall()
+
+            if not rows:
+                # No more results available
+                logger.info(f"No more results available at offset={offset}")
+                break
+
+            logger.info(f"Fetched batch: offset={offset}, size={len(rows)}, total_fetched={offset + len(rows)}")
+
+            # Apply metadata filters in Python
+            before_filter = len(kept)
+            for row in rows:
+                if not self._passes_metadata_filters(row, metadata_filters):
+                    continue
+
+                kept.append(row)
+                if len(kept) >= want:
+                    break
+
+            passed_in_batch = len(kept) - before_filter
+            logger.info(f"  Batch passed filters: {passed_in_batch}/{len(rows)} ({100*passed_in_batch/len(rows):.1f}%)")
+
+            # Update for next iteration
+            offset += batch_size
+
+            # Adaptively grow batch size if selectivity is very low
+            if len(kept) < want * 0.1 and passed_in_batch < len(rows) * 0.05:
+                # Less than 10% of target and less than 5% passing filters
+                old_batch_size = batch_size
+                batch_size = min(batch_size * 2, 5000)
+                logger.info(f"Low selectivity detected, growing batch_size: {old_batch_size} → {batch_size}")
+
+        logger.info(f"Iterative search complete: fetched={offset}, kept={len(kept)}, target={want}")
+
+        if len(kept) < want:
+            logger.warning(f"Could not find enough results: wanted={want}, got={len(kept)}")
+
+        # Sort by distance and limit
+        kept.sort(key=lambda x: x[7])  # Sort by distance (index 7)
+        return kept[:limit]
+
+    # ======================
+    # SEARCH WITH GRANULARITY
+    # ======================
+
     def _search_with_granularity_impl(
         self,
         memory_type: str,
@@ -606,7 +737,7 @@ class SessionMemoryStore:
         session_iter: int = None,
         task_code: str = None,
         limit: int = 3,
-        similarity_threshold: float = 0.7,
+        similarity_threshold: float = 0.5,
         auto_merge_threshold: float = 0.6
     ) -> dict[str, Any]:
         """
@@ -626,13 +757,13 @@ class SessionMemoryStore:
             session_iter: Optional iteration filter
             task_code: Optional task code filter
             limit: Maximum results
-            similarity_threshold: Minimum similarity (0.0-1.0)
+            similarity_threshold: Minimum similarity (0.0-1.0) - KEPT FOR BACKWARD COMPATIBILITY, NOT USED FOR FILTERING
             auto_merge_threshold: For medium, merge if >=X siblings match
 
         Returns:
             Dict with search results at specified granularity
         """
-    
+
         if granularity == "coarse":
             # Return full documents - scoped search without embeddings
             result = self.search_memories(
@@ -646,9 +777,20 @@ class SessionMemoryStore:
             )
             result["granularity"] = "coarse"
             return result
-    
+
         elif granularity == "fine":
-            # Return individual chunks using vector search
+            # Return individual chunks using vector search with TASK 2 iterative fetching
+            logger.info("=" * 80)
+            logger.info("FINE GRANULARITY SEARCH STARTING (TASK 2: ITERATIVE FETCHING)")
+            logger.info(f"  memory_type: {memory_type}")
+            logger.info(f"  query: {query[:100]}...")
+            logger.info(f"  agent_id: {agent_id}")
+            logger.info(f"  session_id: {session_id}")
+            logger.info(f"  session_iter: {session_iter}")
+            logger.info(f"  task_code: {task_code}")
+            logger.info(f"  limit: {limit}")
+            logger.info(f"  similarity_threshold: {similarity_threshold} (NOT USED FOR FILTERING)")
+            logger.info("=" * 80)
             try:
                 # Get embedding model
                 model = self.embedding_model
@@ -661,79 +803,58 @@ class SessionMemoryStore:
                         "message": "Embedding model not available",
                         "error": None
                     }
-            
+
                 # Generate query embedding
                 query_embedding = model.encode([query], show_progress_bar=False)[0]
                 query_bytes = query_embedding.tobytes()
-            
-                # Build filter conditions
-                filter_conditions = ["m.memory_type = ?"]
-                filter_params = [memory_type]
-            
-                if agent_id:
-                    filter_conditions.append("m.agent_id = ?")
-                    filter_params.append(agent_id)
-                if session_id:
-                    filter_conditions.append("m.session_id = ?")
-                    filter_params.append(session_id)
-                if session_iter is not None:
-                    filter_conditions.append("m.session_iter = ?")
-                    filter_params.append(session_iter)
-                if task_code:
-                    filter_conditions.append("m.task_code = ?")
-                    filter_params.append(task_code)
-            
-                filter_clause = " AND " + " AND ".join(filter_conditions) if filter_conditions else ""
-            
-                # Vector search over chunks
+
+                # TASK 2 FIX: Use iterative fetching instead of fixed k×10 multiplier
                 conn = self._get_connection()
-            
-                sql = f"""
-                    SELECT 
-                        vc.chunk_id,
-                        mc.parent_id as memory_id,
-                        mc.chunk_index,
-                        mc.content,
-                        mc.chunk_type,
-                        mc.header_path,
-                        mc.level,
-                        distance
-                    FROM vec_chunk_search vc
-                    JOIN memory_chunks mc ON vc.chunk_id = mc.id
-                    JOIN session_memories m ON mc.parent_id = m.id
-                    WHERE vc.embedding MATCH ?
-                        {filter_clause}
-                    ORDER BY distance
-                    LIMIT ?
-                """
-            
-                params = [query_bytes] + filter_params + [limit * 3]  # Get more for filtering
-                rows = conn.execute(sql, params).fetchall()
+
+                # Build metadata filters dict
+                metadata_filters = {
+                    "memory_type": memory_type,
+                    "agent_id": agent_id,
+                    "session_id": session_id,
+                    "session_iter": session_iter,
+                    "task_code": task_code
+                }
+
+                # Use iterative search to handle low selectivity filters
+                rows = self._iterative_vector_search(conn, query_bytes, limit, metadata_filters)
+
                 conn.close()
-            
-                # Filter by similarity threshold and format results
+
+                logger.info(f"Iterative search returned {len(rows)} filtered chunks")
+
+                # Convert rows to results (no more filtering needed - already done in iterative search)
                 results = []
                 for row in rows:
                     distance = row[7]
-                    similarity = 1.0 - distance  # Convert distance to similarity
-                
-                    if similarity >= similarity_threshold:
-                        results.append({
-                            "chunk_id": row[0],
-                            "memory_id": row[1],
-                            "chunk_index": row[2],
-                            "chunk_content": row[3],
-                            "chunk_type": row[4],
-                            "header_path": row[5],
-                            "level": row[6],
-                            "similarity": float(similarity),
-                            "source": "chunk",
-                            "granularity": "fine"
-                        })
-                
-                    if len(results) >= limit:
-                        break
-            
+                    similarity = 1.0 - (distance**2 / 2.0)  # Convert L2 distance to similarity
+
+                    results.append({
+                        "chunk_id": row[0],
+                        "memory_id": row[1],
+                        "chunk_index": row[2],
+                        "chunk_content": row[3],
+                        "chunk_type": row[4],
+                        "header_path": row[5],
+                        "level": row[6],
+                        "similarity": float(similarity),
+                        "source": "chunk",
+                        "granularity": "fine"
+                    })
+
+                logger.info("=" * 80)
+                logger.info("FINAL RESULTS:")
+                logger.info(f"  Total results: {len(results)} chunks")
+                if results:
+                    logger.info(f"  Best similarity: {results[0]['similarity']}")
+                    if len(results) > 1:
+                        logger.info(f"  Worst similarity: {results[-1]['similarity']}")
+                logger.info("=" * 80)
+
                 return {
                     "success": True,
                     "results": results,
@@ -742,7 +863,7 @@ class SessionMemoryStore:
                     "message": None,
                     "error": None
                 }
-            
+
             except Exception as e:
                 logger.error(f"Fine granularity search failed: {e}", exc_info=True)
                 return {
@@ -753,7 +874,7 @@ class SessionMemoryStore:
                     "message": str(e),
                     "error": "Search failed"
                 }
-    
+
         else:  # medium granularity
             # Return section-level results with auto-merging
             try:
@@ -763,7 +884,7 @@ class SessionMemoryStore:
                     session_iter, task_code, limit * 5,  # Get more chunks for section grouping
                     similarity_threshold, auto_merge_threshold
                 )
-            
+
                 if not fine_result["success"] or not fine_result["results"]:
                     return {
                         "success": True,
@@ -773,15 +894,15 @@ class SessionMemoryStore:
                         "message": fine_result.get("message", "No matching chunks found"),
                         "error": None
                     }
-            
+
                 # Group chunks by section (using header_path parent)
                 conn = self._get_connection()
                 sections = {}
-            
+
                 for chunk_result in fine_result["results"]:
                     memory_id = chunk_result["memory_id"]
                     header_path = chunk_result["header_path"]
-                
+
                     # Get section key (parent header, e.g., "## Natural Language Processing")
                     if not header_path or header_path == "/":
                         section_key = (memory_id, "/")
@@ -790,7 +911,7 @@ class SessionMemoryStore:
                         parts = [p.strip() for p in header_path.split(">") if p.strip()]
                         # Find the highest level heading (usually level 2: ##)
                         section_key = (memory_id, parts[0] if parts else "/")
-                
+
                     if section_key not in sections:
                         sections[section_key] = {
                             "memory_id": memory_id,
@@ -798,17 +919,17 @@ class SessionMemoryStore:
                             "matching_chunks": [],
                             "all_chunk_ids": set()
                         }
-                
+
                     sections[section_key]["matching_chunks"].append(chunk_result)
                     sections[section_key]["all_chunk_ids"].add(chunk_result["chunk_id"])
-            
+
                 # For each section, get all chunks and determine if we should merge
                 section_results = []
-            
+
                 for section_key, section_data in sections.items():
                     memory_id = section_data["memory_id"]
                     section_header = section_data["section_header"]
-                
+
                     # Get all chunks in this section
                     if section_header == "/":
                         # Root level - get all chunks
@@ -827,21 +948,21 @@ class SessionMemoryStore:
                                 AND (header_path = ? OR header_path LIKE ?)
                             ORDER BY chunk_index
                         """, (memory_id, section_header, f"{section_header} >%")).fetchall()
-                
+
                     if not section_chunks:
                         continue
-                
+
                     # Calculate match ratio
                     total_chunks = len(section_chunks)
                     matched_chunks = len(section_data["matching_chunks"])
                     match_ratio = matched_chunks / total_chunks if total_chunks > 0 else 0
-                
+
                     # Build section content
                     section_content = "\n\n".join([chunk[2] for chunk in section_chunks])
-                
+
                     # Get average similarity of matching chunks
                     avg_similarity = sum(c["similarity"] for c in section_data["matching_chunks"]) / matched_chunks
-                
+
                     section_results.append({
                         "memory_id": memory_id,
                         "section_header": section_header,
@@ -855,13 +976,13 @@ class SessionMemoryStore:
                         "source": "expanded_section",
                         "granularity": "medium"
                     })
-            
+
                 conn.close()
-            
+
                 # Sort by similarity and limit
                 section_results.sort(key=lambda x: x["similarity"], reverse=True)
                 section_results = section_results[:limit]
-            
+
                 return {
                     "success": True,
                     "results": section_results,
@@ -870,7 +991,7 @@ class SessionMemoryStore:
                     "message": None,
                     "error": None
                 }
-            
+
             except Exception as e:
                 logger.error(f"Medium granularity search failed: {e}", exc_info=True)
                 return {

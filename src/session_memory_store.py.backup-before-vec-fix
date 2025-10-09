@@ -335,7 +335,7 @@ class SessionMemoryStore:
 
             # Determine if we should chunk (default based on memory type)
             if auto_chunk is None:
-                auto_chunk = config.get('auto_chunk', False)
+                auto_chunk = config.get('default_auto_chunk', False)
 
             # Generate content hash
             content_hash = hashlib.sha256(content.encode()).hexdigest()
@@ -632,7 +632,7 @@ class SessionMemoryStore:
         Returns:
             Dict with search results at specified granularity
         """
-    
+
         if granularity == "coarse":
             # Return full documents - scoped search without embeddings
             result = self.search_memories(
@@ -646,7 +646,7 @@ class SessionMemoryStore:
             )
             result["granularity"] = "coarse"
             return result
-    
+
         elif granularity == "fine":
             # Return individual chunks using vector search
             try:
@@ -661,15 +661,15 @@ class SessionMemoryStore:
                         "message": "Embedding model not available",
                         "error": None
                     }
-            
+
                 # Generate query embedding
                 query_embedding = model.encode([query], show_progress_bar=False)[0]
                 query_bytes = query_embedding.tobytes()
-            
+
                 # Build filter conditions
                 filter_conditions = ["m.memory_type = ?"]
                 filter_params = [memory_type]
-            
+
                 if agent_id:
                     filter_conditions.append("m.agent_id = ?")
                     filter_params.append(agent_id)
@@ -682,14 +682,18 @@ class SessionMemoryStore:
                 if task_code:
                     filter_conditions.append("m.task_code = ?")
                     filter_params.append(task_code)
-            
+
                 filter_clause = " AND " + " AND ".join(filter_conditions) if filter_conditions else ""
-            
+
+                # CRITICAL FIX: sqlite-vec requires k parameter in WHERE clause
+                # Calculate k value - get more results for threshold filtering
+                k_value = limit * 3
+
                 # Vector search over chunks
                 conn = self._get_connection()
-            
+
                 sql = f"""
-                    SELECT 
+                    SELECT
                         vc.chunk_id,
                         mc.parent_id as memory_id,
                         mc.chunk_index,
@@ -702,21 +706,21 @@ class SessionMemoryStore:
                     JOIN memory_chunks mc ON vc.chunk_id = mc.id
                     JOIN session_memories m ON mc.parent_id = m.id
                     WHERE vc.embedding MATCH ?
+                        AND k = ?
                         {filter_clause}
                     ORDER BY distance
-                    LIMIT ?
                 """
-            
-                params = [query_bytes] + filter_params + [limit * 3]  # Get more for filtering
+
+                params = [query_bytes, k_value] + filter_params
                 rows = conn.execute(sql, params).fetchall()
                 conn.close()
-            
+
                 # Filter by similarity threshold and format results
                 results = []
                 for row in rows:
                     distance = row[7]
                     similarity = 1.0 - distance  # Convert distance to similarity
-                
+
                     if similarity >= similarity_threshold:
                         results.append({
                             "chunk_id": row[0],
@@ -730,10 +734,10 @@ class SessionMemoryStore:
                             "source": "chunk",
                             "granularity": "fine"
                         })
-                
+
                     if len(results) >= limit:
                         break
-            
+
                 return {
                     "success": True,
                     "results": results,
@@ -742,7 +746,7 @@ class SessionMemoryStore:
                     "message": None,
                     "error": None
                 }
-            
+
             except Exception as e:
                 logger.error(f"Fine granularity search failed: {e}", exc_info=True)
                 return {
@@ -753,7 +757,7 @@ class SessionMemoryStore:
                     "message": str(e),
                     "error": "Search failed"
                 }
-    
+
         else:  # medium granularity
             # Return section-level results with auto-merging
             try:
@@ -763,7 +767,7 @@ class SessionMemoryStore:
                     session_iter, task_code, limit * 5,  # Get more chunks for section grouping
                     similarity_threshold, auto_merge_threshold
                 )
-            
+
                 if not fine_result["success"] or not fine_result["results"]:
                     return {
                         "success": True,
@@ -773,15 +777,15 @@ class SessionMemoryStore:
                         "message": fine_result.get("message", "No matching chunks found"),
                         "error": None
                     }
-            
+
                 # Group chunks by section (using header_path parent)
                 conn = self._get_connection()
                 sections = {}
-            
+
                 for chunk_result in fine_result["results"]:
                     memory_id = chunk_result["memory_id"]
                     header_path = chunk_result["header_path"]
-                
+
                     # Get section key (parent header, e.g., "## Natural Language Processing")
                     if not header_path or header_path == "/":
                         section_key = (memory_id, "/")
@@ -790,7 +794,7 @@ class SessionMemoryStore:
                         parts = [p.strip() for p in header_path.split(">") if p.strip()]
                         # Find the highest level heading (usually level 2: ##)
                         section_key = (memory_id, parts[0] if parts else "/")
-                
+
                     if section_key not in sections:
                         sections[section_key] = {
                             "memory_id": memory_id,
@@ -798,17 +802,17 @@ class SessionMemoryStore:
                             "matching_chunks": [],
                             "all_chunk_ids": set()
                         }
-                
+
                     sections[section_key]["matching_chunks"].append(chunk_result)
                     sections[section_key]["all_chunk_ids"].add(chunk_result["chunk_id"])
-            
+
                 # For each section, get all chunks and determine if we should merge
                 section_results = []
-            
+
                 for section_key, section_data in sections.items():
                     memory_id = section_data["memory_id"]
                     section_header = section_data["section_header"]
-                
+
                     # Get all chunks in this section
                     if section_header == "/":
                         # Root level - get all chunks
@@ -827,21 +831,21 @@ class SessionMemoryStore:
                                 AND (header_path = ? OR header_path LIKE ?)
                             ORDER BY chunk_index
                         """, (memory_id, section_header, f"{section_header} >%")).fetchall()
-                
+
                     if not section_chunks:
                         continue
-                
+
                     # Calculate match ratio
                     total_chunks = len(section_chunks)
                     matched_chunks = len(section_data["matching_chunks"])
                     match_ratio = matched_chunks / total_chunks if total_chunks > 0 else 0
-                
+
                     # Build section content
                     section_content = "\n\n".join([chunk[2] for chunk in section_chunks])
-                
+
                     # Get average similarity of matching chunks
                     avg_similarity = sum(c["similarity"] for c in section_data["matching_chunks"]) / matched_chunks
-                
+
                     section_results.append({
                         "memory_id": memory_id,
                         "section_header": section_header,
@@ -855,13 +859,13 @@ class SessionMemoryStore:
                         "source": "expanded_section",
                         "granularity": "medium"
                     })
-            
+
                 conn.close()
-            
+
                 # Sort by similarity and limit
                 section_results.sort(key=lambda x: x["similarity"], reverse=True)
                 section_results = section_results[:limit]
-            
+
                 return {
                     "success": True,
                     "results": section_results,
@@ -870,7 +874,7 @@ class SessionMemoryStore:
                     "message": None,
                     "error": None
                 }
-            
+
             except Exception as e:
                 logger.error(f"Medium granularity search failed: {e}", exc_info=True)
                 return {

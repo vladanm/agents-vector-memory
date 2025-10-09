@@ -45,8 +45,8 @@ except ImportError:
 @dataclass
 class ChunkingConfig:
     """Configuration for document chunking"""
-    chunk_size: int = 800
-    chunk_overlap: int = 80
+    chunk_size: int = 450           # Was 800 - reduced to fit within 512 token embedding limit
+    chunk_overlap: int = 50         # Was 80 - 11% overlap maintained
     preserve_structure: bool = True
     content_format: str = ContentFormat.MARKDOWN.value
     memory_type: str = "working_memory"
@@ -199,6 +199,7 @@ class DocumentChunker:
         code_aware_separators = [
             "\n```",    # Code block boundaries (HIGHEST PRIORITY)
             "\n## ",    # Headers
+            "\n### ",   # Sub-headers
             "\n\n",     # Paragraphs
             "\n",       # Lines
             ". ",       # Sentences

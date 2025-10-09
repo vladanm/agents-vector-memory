@@ -12,6 +12,7 @@ import time
 import sqlite3
 import hashlib
 import logging
+import functools
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -40,6 +41,7 @@ except ImportError:
 
 from .chunking import DocumentChunker, ChunkingConfig
 from .memory_types import ContentFormat, ChunkEntry, get_memory_type_config
+from .config import Config
 
 # Import modular operations
 from .storage import StorageOperations
@@ -53,12 +55,180 @@ from .exceptions import (
 from .retry_utils import exponential_backoff, retry_on_lock
 
 
-
 # Valid memory types
 VALID_MEMORY_TYPES = [
     "session_context", "input_prompt", "system_memory", "reports",
     "report_observations", "working_memory", "knowledge_base"
 ]
+
+
+# ======================
+# TASK 7: PERFORMANCE MONITORING
+# ======================
+
+def log_timing(operation_name: str):
+    """
+    Decorator to log operation timing and detect slow queries.
+
+    Logs query execution time and adds timing metadata to result dict.
+    Warns if query exceeds LOG_SLOW_QUERY_THRESHOLD.
+
+    Args:
+        operation_name: Human-readable name for the operation
+    """
+    def decorator(func):
+        @functools.wraps(func)
+        def wrapper(*args, **kwargs):
+            start = time.time()
+            try:
+                result = func(*args, **kwargs)
+                elapsed = time.time() - start
+
+                # Log timing if enabled
+                if Config.LOG_QUERY_TIMING:
+                    logger.info(f"[TIMING] {operation_name}: {elapsed:.3f}s")
+
+                # Warn about slow queries
+                if elapsed > Config.LOG_SLOW_QUERY_THRESHOLD:
+                    logger.warning(
+                        f"SLOW QUERY: {operation_name} took {elapsed:.3f}s "
+                        f"(threshold: {Config.LOG_SLOW_QUERY_THRESHOLD}s)"
+                    )
+
+                # Add timing to result if it's a dict and config enabled
+                if isinstance(result, dict) and Config.LOG_TIMING_TO_RESPONSE:
+                    result["_timing"] = {
+                        "operation": operation_name,
+                        "elapsed_seconds": round(elapsed, 3)
+                    }
+
+                return result
+            except Exception as e:
+                elapsed = time.time() - start
+                logger.error(f"[TIMING] {operation_name} FAILED after {elapsed:.3f}s: {e}")
+                raise
+        return wrapper
+    return decorator
+
+
+class SearchStatistics:
+    """
+    Track search performance statistics for monitoring and optimization.
+
+    Maintains a rolling window of recent queries with timing and result metrics.
+    Calculates P50, P95, P99 latencies and slow query rates.
+    """
+
+    def __init__(self, max_history: int = 1000):
+        """
+        Initialize search statistics tracker.
+
+        Args:
+            max_history: Maximum number of queries to track (rolling window)
+        """
+        self.queries = []
+        self.total_queries = 0
+        self.slow_queries = 0
+        self.max_history = max_history
+
+    def record_query(self, query_type: str, elapsed: float, result_count: int,
+                    metadata: dict = None):
+        """
+        Record query execution statistics.
+
+        Args:
+            query_type: Type of query (e.g., "search_fine", "search_medium")
+            elapsed: Query execution time in seconds
+            result_count: Number of results returned
+            metadata: Optional additional metadata (filters, limits, etc.)
+        """
+        self.total_queries += 1
+
+        if elapsed > Config.LOG_SLOW_QUERY_THRESHOLD:
+            self.slow_queries += 1
+
+        query_record = {
+            "type": query_type,
+            "elapsed": elapsed,
+            "result_count": result_count,
+            "timestamp": time.time(),
+            "is_slow": elapsed > Config.LOG_SLOW_QUERY_THRESHOLD
+        }
+
+        if metadata:
+            query_record["metadata"] = metadata
+
+        self.queries.append(query_record)
+
+        # Keep only last N queries (rolling window)
+        if len(self.queries) > self.max_history:
+            self.queries = self.queries[-self.max_history:]
+
+    def get_stats(self) -> dict:
+        """
+        Get statistics summary with latency percentiles.
+
+        Returns:
+            Dict with query statistics including P50, P95, P99 latencies,
+            slow query rate, and overall query metrics.
+        """
+        if not self.queries:
+            return {
+                "total_queries": self.total_queries,
+                "recent_queries": 0,
+                "average_time": 0.0,
+                "median_time": 0.0,
+                "p50_time": 0.0,
+                "p95_time": 0.0,
+                "p99_time": 0.0,
+                "slow_queries": self.slow_queries,
+                "slow_query_rate": 0.0,
+                "queries_in_window": 0
+            }
+
+        times = sorted([q["elapsed"] for q in self.queries])
+        n = len(times)
+
+        # Calculate percentiles
+        p50_idx = int(n * 0.50)
+        p95_idx = int(n * 0.95)
+        p99_idx = int(n * 0.99)
+
+        return {
+            "total_queries": self.total_queries,
+            "recent_queries": len(self.queries),
+            "average_time": round(sum(times) / n, 3),
+            "median_time": round(times[n // 2], 3),
+            "p50_time": round(times[p50_idx], 3),
+            "p95_time": round(times[p95_idx], 3),
+            "p99_time": round(times[p99_idx], 3),
+            "slow_queries": self.slow_queries,
+            "slow_query_rate": round(self.slow_queries / self.total_queries, 3) if self.total_queries > 0 else 0.0,
+            "queries_in_window": len(self.queries),
+            "query_types": self._count_by_type()
+        }
+
+    def _count_by_type(self) -> dict:
+        """Count queries by type."""
+        counts = {}
+        for q in self.queries:
+            qtype = q["type"]
+            counts[qtype] = counts.get(qtype, 0) + 1
+        return counts
+
+    def get_slow_queries(self, limit: int = 10) -> list:
+        """
+        Get the slowest queries for debugging.
+
+        Args:
+            limit: Maximum number of slow queries to return
+
+        Returns:
+            List of slowest query records
+        """
+        slow = [q for q in self.queries if q["is_slow"]]
+        slow.sort(key=lambda x: x["elapsed"], reverse=True)
+        return slow[:limit]
 
 
 class SessionMemoryStore:
@@ -92,12 +262,36 @@ class SessionMemoryStore:
         # Initialize embedding model (lazily, only when needed)
         self._embedding_model = None
 
+        # TASK 7: Initialize search statistics tracker
+        self.search_stats = SearchStatistics()
 
         # Initialize operation modules
         self.storage = StorageOperations(self)
         self.search = SearchOperations(self)
         self.maintenance = MaintenanceOperations(self)
         self.chunking = ChunkingStorageOperations(self)
+
+        # Warm-start embedding model (ensures it's ready before first use)
+        if Config.WARM_START_EMBEDDING_MODEL:
+            logger.info("Warming up embedding model...")
+            _ = self.embedding_model  # Trigger lazy load
+
+        # Check for chunks missing embeddings
+        missing_count = self._count_chunks_without_embeddings()
+        if missing_count > 0:
+            logger.warning(f"Found {missing_count} chunks without embeddings")
+
+            # Auto-backfill if count is reasonable (<AUTO_BACKFILL_THRESHOLD)
+            if missing_count < Config.AUTO_BACKFILL_THRESHOLD:
+                logger.info("Auto-backfilling embeddings...")
+                result = self.backfill_embeddings()
+                if result["success"]:
+                    logger.info(f"Auto-backfill complete: {result['chunks_processed']} chunks")
+                else:
+                    logger.error(f"Auto-backfill failed: {result.get('error', 'Unknown error')}")
+            else:
+                logger.warning(f"Too many missing embeddings ({missing_count}), manual backfill required")
+                logger.info("Run store.backfill_embeddings() manually")
 
     # ======================
     # LAZY-LOADED PROPERTIES
@@ -166,21 +360,6 @@ class SessionMemoryStore:
         return self._chunker
 
     @property
-    def token_encoder(self) -> Any:
-        """Cached token encoder instance"""
-        if not hasattr(self, '_token_encoder'):
-            if TIKTOKEN_AVAILABLE:
-                try:
-                    import tiktoken
-                    self._token_encoder = tiktoken.get_encoding("cl100k_base")
-                except Exception as e:
-                    logger.warning(f"Failed to initialize tiktoken: {e}")
-                    self._token_encoder = None
-            else:
-                self._token_encoder = None
-        return self._token_encoder
-
-    @property
     def embedding_model(self) -> Any:
         """Lazy-load embedding model for semantic search."""
         if self._embedding_model is None:
@@ -196,6 +375,152 @@ class SessionMemoryStore:
                 self._embedding_model = False
         return self._embedding_model if self._embedding_model is not False else None
 
+    def _count_chunks_without_embeddings(self) -> int:
+        """
+        Count chunks that don't have embeddings.
+
+        Returns:
+            Number of chunks without embeddings
+        """
+        try:
+            conn = self._get_connection()
+            result = conn.execute("""
+                SELECT COUNT(*)
+                FROM memory_chunks c
+                LEFT JOIN vec_chunk_search v ON c.id = v.chunk_id
+                WHERE v.chunk_id IS NULL
+            """).fetchone()
+            conn.close()
+            return result[0] if result else 0
+        except Exception as e:
+            logger.error(f"Failed to count chunks without embeddings: {e}")
+            return 0
+
+    def backfill_embeddings(self, batch_size: int = 32) -> dict[str, Any]:
+        """
+        Backfill embeddings for chunks that don't have them.
+
+        This method finds all chunks without embeddings and generates
+        embeddings for them in batches. It's designed to be safe to run
+        multiple times (idempotent).
+
+        Args:
+            batch_size: Number of chunks to process per batch
+
+        Returns:
+            Dict with backfill statistics:
+            {
+                "success": bool,
+                "chunks_processed": int,
+                "total_chunks": int,
+                "message": str,
+                "error": str (optional)
+            }
+        """
+        try:
+            model = self.embedding_model
+            if model is None:
+                return {
+                    "success": False,
+                    "chunks_processed": 0,
+                    "error": "Embedding model not available"
+                }
+
+            conn = self._get_connection()
+
+            # Get chunks without embeddings
+            chunks = conn.execute("""
+                SELECT c.id, c.content
+                FROM memory_chunks c
+                LEFT JOIN vec_chunk_search v ON c.id = v.chunk_id
+                WHERE v.chunk_id IS NULL
+                ORDER BY c.id
+            """).fetchall()
+
+            total_chunks = len(chunks)
+            if total_chunks == 0:
+                conn.close()
+                return {
+                    "success": True,
+                    "chunks_processed": 0,
+                    "total_chunks": 0,
+                    "message": "No chunks need backfilling"
+                }
+
+            logger.info(f"Backfilling embeddings for {total_chunks} chunks")
+            processed = 0
+
+            # Process in batches
+            for i in range(0, total_chunks, batch_size):
+                batch = chunks[i:i+batch_size]
+                chunk_ids = [c[0] for c in batch]
+                contents = [c[1] for c in batch]
+
+                # Generate embeddings
+                embeddings = model.encode(
+                    contents,
+                    batch_size=batch_size,
+                    show_progress_bar=False,
+                    convert_to_numpy=True
+                )
+
+                # Insert into vec_chunk_search
+                for chunk_id, embedding in zip(chunk_ids, embeddings):
+                    conn.execute("""
+                        INSERT INTO vec_chunk_search (chunk_id, embedding)
+                        VALUES (?, ?)
+                    """, (chunk_id, embedding.tobytes()))
+
+                conn.commit()
+                processed += len(batch)
+
+                if processed % 100 == 0:
+                    logger.info(f"Backfilled {processed}/{total_chunks} chunks")
+
+            conn.close()
+
+            logger.info(f"Backfill complete: {processed} chunks processed")
+
+            return {
+                "success": True,
+                "chunks_processed": processed,
+                "total_chunks": total_chunks,
+                "message": f"Successfully backfilled {processed} embeddings"
+            }
+
+        except Exception as e:
+            logger.error(f"Backfill failed: {e}", exc_info=True)
+            return {
+                "success": False,
+                "chunks_processed": 0,
+                "error": str(e)
+            }
+
+    # ======================
+    # TASK 7: PERFORMANCE STATISTICS API
+    # ======================
+
+    def get_search_statistics(self) -> dict:
+        """
+        Get search performance statistics.
+
+        Returns:
+            Dict with query statistics including P50, P95, P99 latencies,
+            slow query rate, and query type breakdown.
+        """
+        return self.search_stats.get_stats()
+
+    def get_slow_queries(self, limit: int = 10) -> list:
+        """
+        Get the slowest queries for debugging.
+
+        Args:
+            limit: Maximum number of slow queries to return
+
+        Returns:
+            List of slowest query records with timing and metadata
+        """
+        return self.search_stats.get_slow_queries(limit)
 
     # ======================
     # PUBLIC API (Delegates to modules)
@@ -335,7 +660,7 @@ class SessionMemoryStore:
 
             # Determine if we should chunk (default based on memory type)
             if auto_chunk is None:
-                auto_chunk = config.get('auto_chunk', False)
+                auto_chunk = config.get('default_auto_chunk', False)
 
             # Generate content hash
             content_hash = hashlib.sha256(content.encode()).hexdigest()
@@ -370,7 +695,7 @@ class SessionMemoryStore:
                         # Use the property (not _embedding_model) to trigger lazy loading
                         model = self.embedding_model
                         if model is not None:
-                            embeddings = model.encode(chunk_texts, batch_size=32, show_progress_bar=False)
+                            embeddings = model.encode(chunk_texts, batch_size=Config.EMBEDDING_BATCH_SIZE, show_progress_bar=False)
                             # Convert embeddings to bytes and attach to chunks
                             for i, chunk in enumerate(chunks):
                                 chunk.embedding = embeddings[i].tobytes()
@@ -596,6 +921,149 @@ class SessionMemoryStore:
                 "message": str(e)
             }
 
+    # ======================
+    # TASK 2: ITERATIVE POST-FILTER FETCHING HELPER METHODS
+    # ======================
+
+    def _passes_metadata_filters(self, row: tuple, filters: dict) -> bool:
+        """
+        Check if row passes all metadata filters.
+
+        Args:
+            row: Database row tuple
+            filters: Dict with memory_type, agent_id, session_id, session_iter, task_code
+
+        Returns:
+            True if row passes all filters, False otherwise
+        """
+        # row indices: [8]=memory_type, [9]=agent_id, [10]=session_id, [11]=session_iter, [12]=task_code
+
+        if filters.get("memory_type") and row[8] != filters["memory_type"]:
+            return False
+        if filters.get("agent_id") and row[9] != filters["agent_id"]:
+            return False
+        if filters.get("session_id") and row[10] != filters["session_id"]:
+            return False
+        if filters.get("session_iter") is not None and row[11] != filters["session_iter"]:
+            return False
+        if filters.get("task_code") and row[12] != filters["task_code"]:
+            return False
+
+        return True
+
+    def _iterative_vector_search(
+        self,
+        conn: sqlite3.Connection,
+        query_bytes: bytes,
+        limit: int,
+        metadata_filters: dict
+    ) -> list:
+        """
+        Iteratively fetch vector results until enough pass metadata filters.
+
+        This solves the "250→3 after filters" starvation problem by continuing
+        to fetch batches until we have enough filtered results.
+
+        Args:
+            conn: Database connection
+            query_bytes: Query embedding as bytes
+            limit: Target number of results after filtering
+            metadata_filters: Dict with memory_type, agent_id, session_id, etc.
+
+        Returns:
+            List of filtered results (sorted by distance)
+        """
+        start_time = time.time()
+        want = limit
+        batch_size = max(Config.VECTOR_SEARCH_BATCH_SIZE, limit * 50)  # Start large for low selectivity
+        offset = 0
+        kept = []
+        max_offset = Config.VECTOR_SEARCH_MAX_OFFSET  # Safety limit to prevent infinite loops
+
+        logger.info(f"Starting iterative search: want={want}, initial_batch={batch_size}")
+
+        while len(kept) < want and offset < max_offset:
+            # Fetch next batch (no metadata filters in SQL - sqlite-vec limitation)
+            sql = """
+                SELECT
+                    vc.chunk_id,
+                    mc.parent_id as memory_id,
+                    mc.chunk_index,
+                    mc.content,
+                    mc.chunk_type,
+                    mc.header_path,
+                    mc.level,
+                    distance,
+                    m.memory_type,
+                    m.agent_id,
+                    m.session_id,
+                    m.session_iter,
+                    m.task_code
+                FROM vec_chunk_search vc
+                JOIN memory_chunks mc ON vc.chunk_id = mc.id
+                JOIN session_memories m ON mc.parent_id = m.id
+                WHERE vc.embedding MATCH ?
+                    AND k = ?
+                ORDER BY distance
+                LIMIT ? OFFSET ?
+            """
+
+            rows = conn.execute(sql, [query_bytes, batch_size + offset, batch_size, offset]).fetchall()
+
+            if not rows:
+                # No more results available
+                logger.info(f"No more results available at offset={offset}")
+                break
+
+            if Config.LOG_FILTER_STATS:
+                logger.info(f"Fetched batch: offset={offset}, size={len(rows)}, total_fetched={offset + len(rows)}")
+
+            # Apply metadata filters in Python
+            before_filter = len(kept)
+            for row in rows:
+                if not self._passes_metadata_filters(row, metadata_filters):
+                    continue
+
+                kept.append(row)
+                if len(kept) >= want:
+                    break
+
+            passed_in_batch = len(kept) - before_filter
+            if Config.LOG_FILTER_STATS:
+                logger.info(f"  Batch passed filters: {passed_in_batch}/{len(rows)} ({100*passed_in_batch/len(rows):.1f}%)")
+
+            # Update for next iteration
+            offset += batch_size
+
+            # Adaptively grow batch size if selectivity is very low
+            if len(kept) < want * 0.1 and passed_in_batch < len(rows) * 0.05:
+                # Less than 10% of target and less than 5% passing filters
+                old_batch_size = batch_size
+                batch_size = min(batch_size * Config.VECTOR_SEARCH_GROWTH_FACTOR, 5000)
+                logger.info(f"Low selectivity detected, growing batch_size: {old_batch_size} → {batch_size}")
+
+        elapsed = time.time() - start_time
+        logger.info(
+            f"Iterative search performance: "
+            f"elapsed={elapsed:.3f}s, "
+            f"fetched={offset}, "
+            f"kept={len(kept)}, "
+            f"target={want}, "
+            f"batches={offset//Config.VECTOR_SEARCH_BATCH_SIZE}"
+        )
+
+        if len(kept) < want:
+            logger.warning(f"Could not find enough results: wanted={want}, got={len(kept)}")
+
+        # Sort by distance and limit
+        kept.sort(key=lambda x: x[7])  # Sort by distance (index 7)
+        return kept[:limit]
+
+    # ======================
+    # SEARCH WITH GRANULARITY
+    # ======================
+
+    @log_timing("vector_search_fine")
     def _search_with_granularity_impl(
         self,
         memory_type: str,
@@ -606,7 +1074,7 @@ class SessionMemoryStore:
         session_iter: int = None,
         task_code: str = None,
         limit: int = 3,
-        similarity_threshold: float = 0.7,
+        similarity_threshold: float = 0.5,
         auto_merge_threshold: float = 0.6
     ) -> dict[str, Any]:
         """
@@ -626,13 +1094,14 @@ class SessionMemoryStore:
             session_iter: Optional iteration filter
             task_code: Optional task code filter
             limit: Maximum results
-            similarity_threshold: Minimum similarity (0.0-1.0)
+            similarity_threshold: Minimum similarity (0.0-1.0) - KEPT FOR BACKWARD COMPATIBILITY, NOT USED FOR FILTERING
             auto_merge_threshold: For medium, merge if >=X siblings match
 
         Returns:
             Dict with search results at specified granularity
         """
-    
+        search_start = time.time()
+
         if granularity == "coarse":
             # Return full documents - scoped search without embeddings
             result = self.search_memories(
@@ -645,10 +1114,38 @@ class SessionMemoryStore:
                 limit=limit
             )
             result["granularity"] = "coarse"
+
+            # Record statistics
+            elapsed = time.time() - search_start
+            self.search_stats.record_query(
+                f"search_coarse_{memory_type}",
+                elapsed,
+                len(result.get("results", [])),
+                {
+                    "memory_type": memory_type,
+                    "filters": {
+                        "agent_id": agent_id,
+                        "session_id": session_id,
+                        "task_code": task_code
+                    }
+                }
+            )
+
             return result
-    
+
         elif granularity == "fine":
-            # Return individual chunks using vector search
+            # Return individual chunks using vector search with TASK 2 iterative fetching
+            logger.info("=" * 80)
+            logger.info("FINE GRANULARITY SEARCH STARTING (TASK 2: ITERATIVE FETCHING)")
+            logger.info(f"  memory_type: {memory_type}")
+            logger.info(f"  query: {query[:100]}...")
+            logger.info(f"  agent_id: {agent_id}")
+            logger.info(f"  session_id: {session_id}")
+            logger.info(f"  session_iter: {session_iter}")
+            logger.info(f"  task_code: {task_code}")
+            logger.info(f"  limit: {limit}")
+            logger.info(f"  similarity_threshold: {similarity_threshold} (NOT USED FOR FILTERING)")
+            logger.info("=" * 80)
             try:
                 # Get embedding model
                 model = self.embedding_model
@@ -661,79 +1158,71 @@ class SessionMemoryStore:
                         "message": "Embedding model not available",
                         "error": None
                     }
-            
+
                 # Generate query embedding
                 query_embedding = model.encode([query], show_progress_bar=False)[0]
                 query_bytes = query_embedding.tobytes()
-            
-                # Build filter conditions
-                filter_conditions = ["m.memory_type = ?"]
-                filter_params = [memory_type]
-            
-                if agent_id:
-                    filter_conditions.append("m.agent_id = ?")
-                    filter_params.append(agent_id)
-                if session_id:
-                    filter_conditions.append("m.session_id = ?")
-                    filter_params.append(session_id)
-                if session_iter is not None:
-                    filter_conditions.append("m.session_iter = ?")
-                    filter_params.append(session_iter)
-                if task_code:
-                    filter_conditions.append("m.task_code = ?")
-                    filter_params.append(task_code)
-            
-                filter_clause = " AND " + " AND ".join(filter_conditions) if filter_conditions else ""
-            
-                # Vector search over chunks
+
+                # TASK 2 FIX: Use iterative fetching instead of fixed k×10 multiplier
                 conn = self._get_connection()
-            
-                sql = f"""
-                    SELECT 
-                        vc.chunk_id,
-                        mc.parent_id as memory_id,
-                        mc.chunk_index,
-                        mc.content,
-                        mc.chunk_type,
-                        mc.header_path,
-                        mc.level,
-                        distance
-                    FROM vec_chunk_search vc
-                    JOIN memory_chunks mc ON vc.chunk_id = mc.id
-                    JOIN session_memories m ON mc.parent_id = m.id
-                    WHERE vc.embedding MATCH ?
-                        {filter_clause}
-                    ORDER BY distance
-                    LIMIT ?
-                """
-            
-                params = [query_bytes] + filter_params + [limit * 3]  # Get more for filtering
-                rows = conn.execute(sql, params).fetchall()
+
+                # Build metadata filters dict
+                metadata_filters = {
+                    "memory_type": memory_type,
+                    "agent_id": agent_id,
+                    "session_id": session_id,
+                    "session_iter": session_iter,
+                    "task_code": task_code
+                }
+
+                # Use iterative search to handle low selectivity filters
+                rows = self._iterative_vector_search(conn, query_bytes, limit, metadata_filters)
+
                 conn.close()
-            
-                # Filter by similarity threshold and format results
+
+                logger.info(f"Iterative search returned {len(rows)} filtered chunks")
+
+                # Convert rows to results (no more filtering needed - already done in iterative search)
                 results = []
                 for row in rows:
                     distance = row[7]
-                    similarity = 1.0 - distance  # Convert distance to similarity
-                
-                    if similarity >= similarity_threshold:
-                        results.append({
-                            "chunk_id": row[0],
-                            "memory_id": row[1],
-                            "chunk_index": row[2],
-                            "chunk_content": row[3],
-                            "chunk_type": row[4],
-                            "header_path": row[5],
-                            "level": row[6],
-                            "similarity": float(similarity),
-                            "source": "chunk",
-                            "granularity": "fine"
-                        })
-                
-                    if len(results) >= limit:
-                        break
-            
+                    similarity = 1.0 - (distance**2 / 2.0)  # Convert L2 distance to similarity
+
+                    results.append({
+                        "chunk_id": row[0],
+                        "memory_id": row[1],
+                        "chunk_index": row[2],
+                        "chunk_content": row[3],
+                        "chunk_type": row[4],
+                        "header_path": row[5],
+                        "level": row[6],
+                        "similarity": float(similarity),
+                        "source": "chunk",
+                        "granularity": "fine"
+                    })
+
+                logger.info("=" * 80)
+                logger.info("FINAL RESULTS:")
+                logger.info(f"  Total results: {len(results)} chunks")
+                if results:
+                    logger.info(f"  Best similarity: {results[0]['similarity']}")
+                    if len(results) > 1:
+                        logger.info(f"  Worst similarity: {results[-1]['similarity']}")
+                logger.info("=" * 80)
+
+                # Record statistics
+                elapsed = time.time() - search_start
+                self.search_stats.record_query(
+                    f"search_fine_{memory_type}",
+                    elapsed,
+                    len(results),
+                    {
+                        "memory_type": memory_type,
+                        "limit": limit,
+                        "filters": metadata_filters
+                    }
+                )
+
                 return {
                     "success": True,
                     "results": results,
@@ -742,9 +1231,19 @@ class SessionMemoryStore:
                     "message": None,
                     "error": None
                 }
-            
+
             except Exception as e:
-                logger.error(f"Fine granularity search failed: {e}", exc_info=True)
+                elapsed = time.time() - search_start
+                logger.error(f"Fine granularity search failed after {elapsed:.3f}s: {e}", exc_info=True)
+
+                # Record failed query in stats
+                self.search_stats.record_query(
+                    f"search_fine_{memory_type}_FAILED",
+                    elapsed,
+                    0,
+                    {"error": str(e)}
+                )
+
                 return {
                     "success": False,
                     "results": [],
@@ -753,7 +1252,7 @@ class SessionMemoryStore:
                     "message": str(e),
                     "error": "Search failed"
                 }
-    
+
         else:  # medium granularity
             # Return section-level results with auto-merging
             try:
@@ -763,7 +1262,7 @@ class SessionMemoryStore:
                     session_iter, task_code, limit * 5,  # Get more chunks for section grouping
                     similarity_threshold, auto_merge_threshold
                 )
-            
+
                 if not fine_result["success"] or not fine_result["results"]:
                     return {
                         "success": True,
@@ -773,15 +1272,15 @@ class SessionMemoryStore:
                         "message": fine_result.get("message", "No matching chunks found"),
                         "error": None
                     }
-            
+
                 # Group chunks by section (using header_path parent)
                 conn = self._get_connection()
                 sections = {}
-            
+
                 for chunk_result in fine_result["results"]:
                     memory_id = chunk_result["memory_id"]
                     header_path = chunk_result["header_path"]
-                
+
                     # Get section key (parent header, e.g., "## Natural Language Processing")
                     if not header_path or header_path == "/":
                         section_key = (memory_id, "/")
@@ -790,7 +1289,7 @@ class SessionMemoryStore:
                         parts = [p.strip() for p in header_path.split(">") if p.strip()]
                         # Find the highest level heading (usually level 2: ##)
                         section_key = (memory_id, parts[0] if parts else "/")
-                
+
                     if section_key not in sections:
                         sections[section_key] = {
                             "memory_id": memory_id,
@@ -798,17 +1297,17 @@ class SessionMemoryStore:
                             "matching_chunks": [],
                             "all_chunk_ids": set()
                         }
-                
+
                     sections[section_key]["matching_chunks"].append(chunk_result)
                     sections[section_key]["all_chunk_ids"].add(chunk_result["chunk_id"])
-            
+
                 # For each section, get all chunks and determine if we should merge
                 section_results = []
-            
+
                 for section_key, section_data in sections.items():
                     memory_id = section_data["memory_id"]
                     section_header = section_data["section_header"]
-                
+
                     # Get all chunks in this section
                     if section_header == "/":
                         # Root level - get all chunks
@@ -827,21 +1326,21 @@ class SessionMemoryStore:
                                 AND (header_path = ? OR header_path LIKE ?)
                             ORDER BY chunk_index
                         """, (memory_id, section_header, f"{section_header} >%")).fetchall()
-                
+
                     if not section_chunks:
                         continue
-                
+
                     # Calculate match ratio
                     total_chunks = len(section_chunks)
                     matched_chunks = len(section_data["matching_chunks"])
                     match_ratio = matched_chunks / total_chunks if total_chunks > 0 else 0
-                
+
                     # Build section content
                     section_content = "\n\n".join([chunk[2] for chunk in section_chunks])
-                
+
                     # Get average similarity of matching chunks
                     avg_similarity = sum(c["similarity"] for c in section_data["matching_chunks"]) / matched_chunks
-                
+
                     section_results.append({
                         "memory_id": memory_id,
                         "section_header": section_header,
@@ -855,13 +1354,26 @@ class SessionMemoryStore:
                         "source": "expanded_section",
                         "granularity": "medium"
                     })
-            
+
                 conn.close()
-            
+
                 # Sort by similarity and limit
                 section_results.sort(key=lambda x: x["similarity"], reverse=True)
                 section_results = section_results[:limit]
-            
+
+                # Record statistics
+                elapsed = time.time() - search_start
+                self.search_stats.record_query(
+                    f"search_medium_{memory_type}",
+                    elapsed,
+                    len(section_results),
+                    {
+                        "memory_type": memory_type,
+                        "limit": limit,
+                        "auto_merge_threshold": auto_merge_threshold
+                    }
+                )
+
                 return {
                     "success": True,
                     "results": section_results,
@@ -870,9 +1382,19 @@ class SessionMemoryStore:
                     "message": None,
                     "error": None
                 }
-            
+
             except Exception as e:
-                logger.error(f"Medium granularity search failed: {e}", exc_info=True)
+                elapsed = time.time() - search_start
+                logger.error(f"Medium granularity search failed after {elapsed:.3f}s: {e}", exc_info=True)
+
+                # Record failed query in stats
+                self.search_stats.record_query(
+                    f"search_medium_{memory_type}_FAILED",
+                    elapsed,
+                    0,
+                    {"error": str(e)}
+                )
+
                 return {
                     "success": False,
                     "results": [],

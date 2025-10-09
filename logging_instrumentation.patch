@@ -1,0 +1,288 @@
+--- a/src/session_memory_store.py
++++ b/src/session_memory_store.py
+@@ -183,12 +183,20 @@ class SessionMemoryStore:
+     @property
+     def embedding_model(self) -> Any:
+         """Lazy-load embedding model for semantic search."""
++        import time
+         if self._embedding_model is None:
++            logger.info("[embedding_model] LAZY LOADING - First access detected")
++            start_time = time.time()
+             try:
++                logger.info("[embedding_model] Importing SentenceTransformer...")
+                 from sentence_transformers import SentenceTransformer
++                logger.info("[embedding_model] Creating model instance: all-MiniLM-L6-v2")
+                 self._embedding_model = SentenceTransformer(
+                     'all-MiniLM-L6-v2',
+                     device='cpu'
+                 )
+-                logger.info("Embedding model loaded successfully")
++                elapsed = time.time() - start_time
++                logger.info(f"[embedding_model] ✓ Model loaded successfully in {elapsed:.2f}s")
+             except Exception as e:
+-                logger.warning(f"Failed to load embedding model: {e}")
++                elapsed = time.time() - start_time
++                logger.error(f"[embedding_model] ✗ Failed to load model after {elapsed:.2f}s: {e}", exc_info=True)
+                 self._embedding_model = False
++        else:
++            if self._embedding_model is False:
++                logger.debug("[embedding_model] Model previously failed to load, returning None")
++            else:
++                logger.debug("[embedding_model] Returning cached model instance")
+         return self._embedding_model if self._embedding_model is not False else None
+ 
+@@ -252,6 +260,7 @@ class SessionMemoryStore:
+     def _store_memory_impl(
+         self,
+         memory_type: str,
+         agent_id: str,
+         session_id: str,
+         content: str,
+@@ -285,7 +294,18 @@ class SessionMemoryStore:
+         Returns:
+             Dict with success status and memory details
+         """
++        import time
++        logger.info("=" * 80)
++        logger.info(f"[_store_memory_impl] ENTRY")
++        logger.info(f"[_store_memory_impl] memory_type={memory_type}, agent_id={agent_id}, session_id={session_id}")
++        logger.info(f"[_store_memory_impl] session_iter={session_iter}, task_code={task_code}")
++        logger.info(f"[_store_memory_impl] content_length={len(content)}, auto_chunk={auto_chunk}")
++        logger.info(f"[_store_memory_impl] title={title}, description={description}")
++        overall_start = time.time()
++        
+         try:
++            logger.info(f"[_store_memory_impl] Step 1: Validating memory_type")
++            step_start = time.time()
+             # Validate memory type
+             if memory_type not in VALID_MEMORY_TYPES:
++                logger.error(f"[_store_memory_impl] Invalid memory type: {memory_type}")
+                 return {
+                     "success": False,
+@@ -300,7 +320,11 @@ class SessionMemoryStore:
+                     "message": f"Memory type must be one of: {VALID_MEMORY_TYPES}"
+                 }
++            logger.debug(f"[_store_memory_impl] ✓ memory_type valid ({time.time() - step_start:.3f}s)")
+ 
++            logger.info(f"[_store_memory_impl] Step 2: Validating agent_id")
++            step_start = time.time()
+             # Validate agent_id (must not be empty)
+             if not agent_id or agent_id.strip() == "":
++                logger.error(f"[_store_memory_impl] Invalid agent_id: empty or whitespace")
+                 return {
+                     "success": False,
+@@ -315,7 +339,11 @@ class SessionMemoryStore:
+                     "message": "agent_id cannot be empty"
+                 }
++            logger.debug(f"[_store_memory_impl] ✓ agent_id valid ({time.time() - step_start:.3f}s)")
+ 
++            logger.info(f"[_store_memory_impl] Step 3: Validating session_id")
++            step_start = time.time()
+             # Validate session_id (must not be empty)
+             if not session_id or session_id.strip() == "":
++                logger.error(f"[_store_memory_impl] Invalid session_id: empty or whitespace")
+                 return {
+                     "success": False,
+@@ -330,25 +358,47 @@ class SessionMemoryStore:
+                     "message": "session_id cannot be empty"
+                 }
++            logger.debug(f"[_store_memory_impl] ✓ session_id valid ({time.time() - step_start:.3f}s)")
+ 
++            logger.info(f"[_store_memory_impl] Step 4: Getting memory type config")
++            step_start = time.time()
+             # Get memory type config
+             config = get_memory_type_config(memory_type)
++            logger.debug(f"[_store_memory_impl] ✓ Config retrieved ({time.time() - step_start:.3f}s)")
+ 
++            logger.info(f"[_store_memory_impl] Step 5: Determining chunking strategy")
++            step_start = time.time()
+             # Determine if we should chunk (default based on memory type)
+             if auto_chunk is None:
+                 auto_chunk = config.get('auto_chunk', False)
++                logger.info(f"[_store_memory_impl] auto_chunk set to {auto_chunk} (from config)")
++            else:
++                logger.info(f"[_store_memory_impl] auto_chunk={auto_chunk} (explicit)")
++            logger.debug(f"[_store_memory_impl] ✓ Chunking strategy determined ({time.time() - step_start:.3f}s)")
+ 
++            logger.info(f"[_store_memory_impl] Step 6: Generating content hash")
++            step_start = time.time()
+             # Generate content hash
+             content_hash = hashlib.sha256(content.encode()).hexdigest()
++            logger.debug(f"[_store_memory_impl] ✓ Hash generated: {content_hash[:16]}... ({time.time() - step_start:.3f}s)")
+ 
++            logger.info(f"[_store_memory_impl] Step 7: Preparing timestamps and JSON")
++            step_start = time.time()
+             # Prepare timestamps
+             now = datetime.now(timezone.utc).isoformat()
+ 
+             # Prepare tags and metadata as JSON
+             tags_json = json.dumps(tags if tags else [])
+             metadata_json = json.dumps(metadata if metadata else {})
++            logger.debug(f"[_store_memory_impl] ✓ Timestamps and JSON prepared ({time.time() - step_start:.3f}s)")
+ 
+             # CRITICAL FIX: Do expensive operations (chunking, embedding) BEFORE opening connection
+             # This prevents holding database locks during long-running operations
+             chunks = []
+             chunks_created = 0
+             if auto_chunk:
++                logger.info("=" * 60)
++                logger.info(f"[_store_memory_impl] Step 8: AUTO-CHUNKING ENABLED")
++                logger.info(f"[_store_memory_impl] Content will be chunked before DB insertion")
++                logger.info("=" * 60)
++                
++                step_start = time.time()
+                 chunk_metadata = {
+                     'memory_type': memory_type,
+                     'title': title or 'Untitled',
+                     'enable_enrichment': True
+                 }
++                logger.debug(f"[_store_memory_impl] Chunk metadata prepared")
+ 
++                logger.info(f"[_store_memory_impl] Calling chunker.chunk_document()...")
++                chunk_start = time.time()
+                 # Chunk document (use placeholder memory_id=0, will update after insert)
+                 chunks = self.chunker.chunk_document(content, 0, chunk_metadata)
++                chunk_elapsed = time.time() - chunk_start
++                logger.info(f"[_store_memory_impl] ✓ Chunking complete: {len(chunks)} chunks in {chunk_elapsed:.2f}s")
+ 
++                logger.info(f"[_store_memory_impl] Step 9: Generating embeddings for {len(chunks)} chunks")
+                 # Generate embeddings for all chunks in batch (10-50x faster than sequential)
+                 # FIX: Always try to generate embeddings if chunks exist
+                 # The embedding_model property will handle lazy loading and error cases
+                 if chunks:
++                    embed_start = time.time()
+                     chunk_texts = [chunk.content for chunk in chunks]
++                    logger.info(f"[_store_memory_impl] Extracted {len(chunk_texts)} chunk texts")
++                    
+                     try:
++                        logger.info(f"[_store_memory_impl] Accessing embedding_model property...")
++                        model_access_start = time.time()
+                         # Use the property (not _embedding_model) to trigger lazy loading
+                         model = self.embedding_model
++                        model_access_elapsed = time.time() - model_access_start
++                        logger.info(f"[_store_memory_impl] embedding_model access took {model_access_elapsed:.2f}s")
++                        
+                         if model is not None:
++                            logger.info(f"[_store_memory_impl] Model available, calling model.encode()...")
++                            encode_start = time.time()
+                             embeddings = model.encode(chunk_texts, batch_size=32, show_progress_bar=False)
++                            encode_elapsed = time.time() - encode_start
++                            logger.info(f"[_store_memory_impl] ✓ Encoding complete: {len(embeddings)} embeddings in {encode_elapsed:.2f}s")
++                            
++                            logger.info(f"[_store_memory_impl] Converting embeddings to bytes...")
++                            convert_start = time.time()
+                             # Convert embeddings to bytes and attach to chunks
+                             for i, chunk in enumerate(chunks):
+                                 chunk.embedding = embeddings[i].tobytes()
+-                            logger.info(f"Generated {len(embeddings)} chunk embeddings")
++                            convert_elapsed = time.time() - convert_start
++                            logger.info(f"[_store_memory_impl] ✓ Converted {len(embeddings)} embeddings to bytes in {convert_elapsed:.2f}s")
++                            
++                            total_embed_time = time.time() - embed_start
++                            logger.info(f"[_store_memory_impl] ✓ Total embedding process: {total_embed_time:.2f}s")
+                         else:
+-                            logger.warning("Embedding model not available, chunks will not have embeddings")
++                            logger.warning(f"[_store_memory_impl] ⚠ Embedding model not available, chunks will not have embeddings")
+                     except Exception as e:
+-                        logger.warning(f"Failed to generate embeddings for chunks: {e}")
++                        embed_elapsed = time.time() - embed_start
++                        logger.error(f"[_store_memory_impl] ✗ Failed to generate embeddings after {embed_elapsed:.2f}s: {e}", exc_info=True)
+                         # Continue without embeddings
++                
++                total_chunking_time = time.time() - step_start
++                logger.info("=" * 60)
++                logger.info(f"[_store_memory_impl] CHUNKING COMPLETE")
++                logger.info(f"[_store_memory_impl] Total time: {total_chunking_time:.2f}s")
++                logger.info(f"[_store_memory_impl] Chunks created: {len(chunks)}")
++                logger.info("=" * 60)
++            else:
++                logger.info(f"[_store_memory_impl] Step 8: Auto-chunking DISABLED, skipping")
+ 
++            logger.info("=" * 60)
++            logger.info(f"[_store_memory_impl] Step 10: Opening database connection")
++            logger.info(f"[_store_memory_impl] All expensive operations complete, safe to acquire lock")
++            logger.info("=" * 60)
++            db_start = time.time()
+             # NOW open connection - all expensive operations are done
+             conn = self._get_connection()
++            db_connect_elapsed = time.time() - db_start
++            logger.info(f"[_store_memory_impl] ✓ Database connection opened in {db_connect_elapsed:.3f}s")
+ 
+             try:
++                logger.info(f"[_store_memory_impl] Step 11: Inserting memory record into session_memories table")
++                insert_start = time.time()
+                 cursor = conn.execute("""
+                     INSERT INTO session_memories
+                     (memory_type, agent_id, session_id, session_iter, task_code, content,
+@@ -396,11 +494,19 @@ class SessionMemoryStore:
+                 ))
+ 
+                 memory_id = cursor.lastrowid
++                insert_elapsed = time.time() - insert_start
++                logger.info(f"[_store_memory_impl] ✓ Memory record inserted: memory_id={memory_id} ({insert_elapsed:.3f}s)")
+ 
++                logger.info(f"[_store_memory_impl] Step 12: Storing embeddings (if provided)")
+                 # Store embedding if provided
+                 if embedding:
++                    logger.debug(f"[_store_memory_impl] Inserting pre-computed embedding for memory_id={memory_id}")
+                     conn.execute("""
+                         INSERT INTO vec_session_search (memory_id, embedding)
+                         VALUES (?, ?)
+                     """, (memory_id, json.dumps(embedding).encode()))
++                    logger.debug(f"[_store_memory_impl] ✓ Embedding stored")
++                else:
++                    logger.debug(f"[_store_memory_impl] No pre-computed embedding provided, skipping")
+ 
++                logger.info(f"[_store_memory_impl] Step 13: Inserting {len(chunks)} chunk records")
++                chunk_insert_start = time.time()
+                 # Insert pre-computed chunks
+                 for chunk in chunks:
+                     # Update parent_id to actual memory_id
+@@ -436,12 +548,22 @@ class SessionMemoryStore:
+                         """, (chunk_id, chunk.embedding))
+ 
+                 chunks_created = len(chunks)
++                chunk_insert_elapsed = time.time() - chunk_insert_start
++                logger.info(f"[_store_memory_impl] ✓ {chunks_created} chunks inserted in {chunk_insert_elapsed:.3f}s")
+ 
++                logger.info(f"[_store_memory_impl] Step 14: Committing transaction")
++                commit_start = time.time()
+                 conn.commit()
++                commit_elapsed = time.time() - commit_start
++                logger.info(f"[_store_memory_impl] ✓ Transaction committed ({commit_elapsed:.3f}s)")
++                
++                logger.info(f"[_store_memory_impl] Step 15: Closing connection")
+                 conn.close()
++                logger.debug(f"[_store_memory_impl] ✓ Connection closed")
+ 
++                total_elapsed = time.time() - overall_start
++                logger.info("=" * 80)
++                logger.info(f"[_store_memory_impl] SUCCESS")
++                logger.info(f"[_store_memory_impl] memory_id={memory_id}, chunks_created={chunks_created}")
++                logger.info(f"[_store_memory_impl] Total execution time: {total_elapsed:.2f}s")
++                logger.info("=" * 80)
++                
+                 return {
+                     "success": True,
+@@ -455,11 +577,20 @@ class SessionMemoryStore:
+                 }
+ 
+             except Exception as e:
++                logger.error(f"[_store_memory_impl] DATABASE ERROR during transaction")
++                logger.error(f"[_store_memory_impl] Rolling back transaction...")
+                 conn.rollback()
++                logger.info(f"[_store_memory_impl] ✓ Rollback complete")
+                 conn.close()
++                logger.error(f"[_store_memory_impl] Exception: {e}", exc_info=True)
+                 raise
+ 
+         except Exception as e:
+-            logger.error(f"Failed to store memory: {e}", exc_info=True)
++            total_elapsed = time.time() - overall_start
++            logger.error("=" * 80)
++            logger.error(f"[_store_memory_impl] FAILURE")
++            logger.error(f"[_store_memory_impl] Exception after {total_elapsed:.2f}s: {e}")
++            logger.error(f"[_store_memory_impl] Full traceback:", exc_info=True)
++            logger.error("=" * 80)
+             return {
+                 "success": False,
