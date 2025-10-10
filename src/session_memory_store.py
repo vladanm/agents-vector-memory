@@ -1598,12 +1598,12 @@ class SessionMemoryStore:
                     "session_iter": row[4],
                     "task_code": row[5],
                     "content": row[6],
-                    "title": row[7],
-                    "description": row[8],
-                    "tags": json.loads(row[9]) if row[9] else [],
-                    "metadata": json.loads(row[10]) if row[10] else {},
-                    "created_at": row[12],
-                    "updated_at": row[13]
+                    "title": row[8],
+                    "description": row[9],
+                    "tags": json.loads(row[10]) if row[10] else [],
+                    "metadata": json.loads(row[11]) if row[11] else {},
+                    "created_at": row[14],
+                    "updated_at": row[15]
                 },
                 "message": f"Found context for task_code: {current_task_code}",
                 "error": None
@@ -1656,15 +1656,15 @@ class SessionMemoryStore:
                     "session_iter": row[4],
                     "task_code": row[5],
                     "content": row[6],
-                    "title": row[7],
-                    "description": row[8],
-                    "tags": json.loads(row[9]) if row[9] else [],
-                    "metadata": json.loads(row[10]) if row[10] else {},
-                    "content_hash": row[11],
-                    "created_at": row[12],
-                    "updated_at": row[13],
-                    "accessed_at": row[14],
-                    "access_count": row[15]
+                    "title": row[8],
+                    "description": row[9],
+                    "tags": json.loads(row[10]) if row[10] else [],
+                    "metadata": json.loads(row[11]) if row[11] else {},
+                    "content_hash": row[12],
+                    "created_at": row[14],
+                    "updated_at": row[15],
+                    "accessed_at": row[16],
+                    "access_count": row[17]
                 },
                 "error": None,
                 "message": None
