@@ -114,7 +114,7 @@ Before testing, enumerate all available MCP functions to confirm the server is r
 **Vector Search (1):**
 - `search_system_memory` (semantic)
 
-**Granular Search (13 = 3 memory types × 3 granularities + knowledge_base variants):**
+**Granular Search (13 = 3 memory types ï¿½ 3 granularities + knowledge_base variants):**
 
 | Base Function | Granularity | Returns |
 |---------------|-------------|---------|
@@ -700,8 +700,8 @@ Just a single line.
 
 **Validation Checks:**
 1.  Auto-chunking behavior depends on content length
-2.  Small content (< 450 tokens) ’ 0 chunks
-3.  Large content ’ chunks created
+2.  Small content (< 450 tokens) ï¿½ 0 chunks
+3.  Large content ï¿½ chunks created
 
 #### Cleanup Phase
 - Record memory_id: `WORKING_MEMORY_001 = <memory_id>`
@@ -2015,9 +2015,762 @@ Record: `DELETE_TEST_ID = <memory_id>`
 
 ---
 
-## 9. Edge Case and Error Tests
+## 9. Filter Parameter Testing
 
-### Test 9.1: Empty Content
+### Overview
+
+This section tests the **filtering functionality** for all search operations to ensure that `session_id`, `agent_id`, `session_iter`, and `task_code` filters work correctly. This is critical for multi-agent memory isolation and session scoping.
+
+**Critical Bug Context:** Prior analysis identified filtering issues where session_iter type mismatches (string "v1" vs integer 1) caused filters to fail silently. These tests will validate the fix.
+
+---
+
+### Test 9.1: Baseline Multi-Session Data Setup
+
+**Category:** Filter Testing - Setup
+**Purpose:** Create test data across multiple sessions, agents, and iterations
+
+#### Setup Phase
+
+Create structured test data to validate filtering:
+
+**Session 1, Agent A, Iteration v1:**
+```json
+{
+  "tool": "store_report",
+  "parameters": {
+    "agent_id": "agent-alpha",
+    "session_id": "filter-session-001",
+    "session_iter": "v1",
+    "task_code": "task-A",
+    "content": "Report A1: Database performance analysis for session 001",
+    "title": "Report A1"
+  }
+}
+```
+Record: `FILTER_REPORT_A1`
+
+**Session 1, Agent A, Iteration v2:**
+```json
+{
+  "tool": "store_report",
+  "parameters": {
+    "agent_id": "agent-alpha",
+    "session_id": "filter-session-001",
+    "session_iter": "v2",
+    "task_code": "task-A",
+    "content": "Report A2: Updated database performance analysis for session 001",
+    "title": "Report A2"
+  }
+}
+```
+Record: `FILTER_REPORT_A2`
+
+**Session 1, Agent B, Iteration v1:**
+```json
+{
+  "tool": "store_report",
+  "parameters": {
+    "agent_id": "agent-beta",
+    "session_id": "filter-session-001",
+    "session_iter": "v1",
+    "task_code": "task-B",
+    "content": "Report B1: API performance analysis for session 001",
+    "title": "Report B1"
+  }
+}
+```
+Record: `FILTER_REPORT_B1`
+
+**Session 2, Agent A, Iteration v1:**
+```json
+{
+  "tool": "store_report",
+  "parameters": {
+    "agent_id": "agent-alpha",
+    "session_id": "filter-session-002",
+    "session_iter": "v1",
+    "task_code": "task-A",
+    "content": "Report C1: Database performance analysis for session 002",
+    "title": "Report C1"
+  }
+}
+```
+Record: `FILTER_REPORT_C1`
+
+**Session 2, Agent B, Iteration v1:**
+```json
+{
+  "tool": "store_report",
+  "parameters": {
+    "agent_id": "agent-beta",
+    "session_id": "filter-session-002",
+    "session_iter": "v1",
+    "task_code": "task-B",
+    "content": "Report D1: API performance analysis for session 002",
+    "title": "Report D1"
+  }
+}
+```
+Record: `FILTER_REPORT_D1`
+
+#### Validation Phase
+
+**Validation Checks:**
+1. All 5 reports stored successfully
+2. Each report has unique memory_id
+3. Reports stored with correct metadata (agent_id, session_id, session_iter, task_code)
+
+**Test Data Matrix:**
+```
+Report  | Agent       | Session           | Iter | Task   | Content Keyword
+--------|-------------|-------------------|------|--------|------------------
+A1      | agent-alpha | filter-session-001| v1   | task-A | "Database...001"
+A2      | agent-alpha | filter-session-001| v2   | task-A | "Updated...001"
+B1      | agent-beta  | filter-session-001| v1   | task-B | "API...001"
+C1      | agent-alpha | filter-session-002| v1   | task-A | "Database...002"
+D1      | agent-beta  | filter-session-002| v1   | task-B | "API...002"
+```
+
+---
+
+### Test 9.2: Filter by session_id Only
+
+**Category:** Filter Testing - Session Isolation
+**Purpose:** Verify session_id filter returns only matching session data
+
+#### Execution Phase
+
+**Search Session 001:**
+```json
+{
+  "tool": "search_reports_specific_chunks",
+  "parameters": {
+    "query": "performance analysis",
+    "session_id": "filter-session-001",
+    "limit": 10
+  }
+}
+```
+
+#### Validation Phase
+
+**Expected Results:**
+- Should return: A1, A2, B1 (session-001 only)
+- Should NOT return: C1, D1 (session-002)
+
+**Validation Checks:**
+1. `total_results` = 3
+2. All results have `session_id = "filter-session-001"`
+3. Results include both agent-alpha and agent-beta data
+4. Results include both v1 and v2 iterations
+
+**Search Session 002:**
+```json
+{
+  "tool": "search_reports_specific_chunks",
+  "parameters": {
+    "query": "performance analysis",
+    "session_id": "filter-session-002",
+    "limit": 10
+  }
+}
+```
+
+**Expected Results:**
+- Should return: C1, D1 (session-002 only)
+- Should NOT return: A1, A2, B1
+
+**Validation Checks:**
+1. `total_results` = 2
+2. All results have `session_id = "filter-session-002"`
+3. No leakage from session-001
+
+---
+
+### Test 9.3: Filter by agent_id Only
+
+**Category:** Filter Testing - Agent Isolation
+**Purpose:** Verify agent_id filter returns only that agent's data
+
+#### Execution Phase
+
+**Search Agent Alpha:**
+```json
+{
+  "tool": "search_reports_specific_chunks",
+  "parameters": {
+    "query": "performance analysis",
+    "agent_id": "agent-alpha",
+    "limit": 10
+  }
+}
+```
+
+#### Validation Phase
+
+**Expected Results:**
+- Should return: A1, A2, C1 (agent-alpha only)
+- Should NOT return: B1, D1 (agent-beta)
+
+**Validation Checks:**
+1. `total_results` = 3
+2. All results have `agent_id = "agent-alpha"`
+3. Results span multiple sessions (001, 002)
+4. Results include multiple iterations (v1, v2)
+
+**Search Agent Beta:**
+```json
+{
+  "tool": "search_reports_specific_chunks",
+  "parameters": {
+    "query": "performance analysis",
+    "agent_id": "agent-beta",
+    "limit": 10
+  }
+}
+```
+
+**Expected Results:**
+- Should return: B1, D1 (agent-beta only)
+- Should NOT return: A1, A2, C1
+
+**Validation Checks:**
+1. `total_results` = 2
+2. All results have `agent_id = "agent-beta"`
+3. No leakage from agent-alpha
+
+---
+
+### Test 9.4: Filter by session_iter Only (CRITICAL TEST)
+
+**Category:** Filter Testing - Iteration Filtering
+**Purpose:** Verify session_iter filter with integer and string formats
+
+**CRITICAL:** This test validates the type mismatch bug fix.
+
+#### Execution Phase - Integer Format
+
+**Search with Integer 1:**
+```json
+{
+  "tool": "search_reports_specific_chunks",
+  "parameters": {
+    "query": "performance analysis",
+    "session_iter": 1,
+    "limit": 10
+  }
+}
+```
+
+#### Validation Phase
+
+**Expected Results:**
+- Should return: A1, B1, C1, D1 (all v1 iterations)
+- Should NOT return: A2 (v2 iteration)
+
+**Validation Checks:**
+1. `total_results` = 4
+2. All results have `session_iter = 1` (or "v1" in database)
+3. **CRITICAL:** Integer 1 matches string "v1" in database
+4. No v2 iterations returned
+
+**Log Verification:**
+- Check logs for: "Batch passed filters: N/4" where N = 4 (100% pass rate)
+- NO "Could not find enough results" warnings
+- Iterative search statistics show good selectivity
+
+#### Execution Phase - String Format (If API Supports)
+
+**Search with String "v1":**
+```json
+{
+  "tool": "search_reports_specific_chunks",
+  "parameters": {
+    "query": "performance analysis",
+    "session_iter": "v1",
+    "limit": 10
+  }
+}
+```
+
+**Expected Results:**
+- Same as integer format: A1, B1, C1, D1
+
+**Validation Checks:**
+1. String "v1" matches integer 1 in database
+2. Results identical to integer format test
+
+---
+
+### Test 9.5: Filter by session_iter = v2
+
+**Category:** Filter Testing - Iteration Filtering
+**Purpose:** Verify v2 iteration filtering
+
+#### Execution Phase
+
+**Search Iteration v2:**
+```json
+{
+  "tool": "search_reports_specific_chunks",
+  "parameters": {
+    "query": "performance analysis",
+    "session_iter": 2,
+    "limit": 10
+  }
+}
+```
+
+#### Validation Phase
+
+**Expected Results:**
+- Should return: A2 (only v2 iteration)
+- Should NOT return: A1, B1, C1, D1 (all v1)
+
+**Validation Checks:**
+1. `total_results` = 1
+2. Result has `session_iter = 2`
+3. Content contains "Updated" (A2's distinguishing feature)
+
+---
+
+### Test 9.6: Filter by task_code Only
+
+**Category:** Filter Testing - Task Code Filtering
+**Purpose:** Verify task_code filter works correctly
+
+#### Execution Phase
+
+**Search Task A:**
+```json
+{
+  "tool": "search_reports_specific_chunks",
+  "parameters": {
+    "query": "performance analysis",
+    "task_code": "task-A",
+    "limit": 10
+  }
+}
+```
+
+#### Validation Phase
+
+**Expected Results:**
+- Should return: A1, A2, C1 (all task-A)
+- Should NOT return: B1, D1 (task-B)
+
+**Validation Checks:**
+1. `total_results` = 3
+2. All results have `task_code = "task-A"`
+3. Results span multiple sessions and iterations
+
+**Search Task B:**
+```json
+{
+  "tool": "search_reports_specific_chunks",
+  "parameters": {
+    "query": "performance analysis",
+    "task_code": "task-B",
+    "limit": 10
+  }
+}
+```
+
+**Expected Results:**
+- Should return: B1, D1 (all task-B)
+- Should NOT return: A1, A2, C1
+
+---
+
+### Test 9.7: Combined Filter - session_id + agent_id
+
+**Category:** Filter Testing - Multi-Filter Combination
+**Purpose:** Verify multiple filters work together correctly
+
+#### Execution Phase
+
+**Search Session 001 + Agent Alpha:**
+```json
+{
+  "tool": "search_reports_specific_chunks",
+  "parameters": {
+    "query": "performance analysis",
+    "session_id": "filter-session-001",
+    "agent_id": "agent-alpha",
+    "limit": 10
+  }
+}
+```
+
+#### Validation Phase
+
+**Expected Results:**
+- Should return: A1, A2 (session-001 AND agent-alpha)
+- Should NOT return: B1 (wrong agent), C1/D1 (wrong session)
+
+**Validation Checks:**
+1. `total_results` = 2
+2. All results match BOTH filters
+3. Results have `session_id = "filter-session-001"` AND `agent_id = "agent-alpha"`
+
+---
+
+### Test 9.8: Combined Filter - session_id + session_iter
+
+**Category:** Filter Testing - Session + Iteration
+**Purpose:** Verify session and iteration filters combine correctly
+
+#### Execution Phase
+
+**Search Session 001 + Iteration v1:**
+```json
+{
+  "tool": "search_reports_specific_chunks",
+  "parameters": {
+    "query": "performance analysis",
+    "session_id": "filter-session-001",
+    "session_iter": 1,
+    "limit": 10
+  }
+}
+```
+
+#### Validation Phase
+
+**Expected Results:**
+- Should return: A1, B1 (session-001 AND v1)
+- Should NOT return: A2 (wrong iteration), C1/D1 (wrong session)
+
+**Validation Checks:**
+1. `total_results` = 2
+2. All results have `session_id = "filter-session-001"` AND `session_iter = 1`
+3. No v2 iterations returned
+
+---
+
+### Test 9.9: Combined Filter - All Parameters
+
+**Category:** Filter Testing - Maximum Specificity
+**Purpose:** Test all filters combined (session_id + agent_id + session_iter + task_code)
+
+#### Execution Phase
+
+**Search All Filters:**
+```json
+{
+  "tool": "search_reports_specific_chunks",
+  "parameters": {
+    "query": "performance analysis",
+    "session_id": "filter-session-001",
+    "agent_id": "agent-alpha",
+    "session_iter": 1,
+    "task_code": "task-A",
+    "limit": 10
+  }
+}
+```
+
+#### Validation Phase
+
+**Expected Results:**
+- Should return: A1 ONLY (matches all 4 filters)
+- Should NOT return: A2 (wrong iter), B1 (wrong agent/task), C1/D1 (wrong session)
+
+**Validation Checks:**
+1. `total_results` = 1
+2. Single result is A1
+3. Result matches ALL filter criteria
+4. Content contains "Database...001"
+
+---
+
+### Test 9.10: Filter with No Matches
+
+**Category:** Filter Testing - Empty Results
+**Purpose:** Verify filters return empty when no matches exist
+
+#### Execution Phase
+
+**Search Non-Existent Session:**
+```json
+{
+  "tool": "search_reports_specific_chunks",
+  "parameters": {
+    "query": "performance analysis",
+    "session_id": "filter-session-999",
+    "limit": 10
+  }
+}
+```
+
+#### Validation Phase
+
+**Expected Results:**
+```json
+{
+  "success": true,
+  "results": [],
+  "total_results": 0
+}
+```
+
+**Validation Checks:**
+1. `success` is true (not an error)
+2. `results` is empty array
+3. `total_results` = 0
+4. No exceptions in logs
+
+**Log Verification:**
+- Check for: "Could not find enough results: wanted=10, got=0"
+- Verify: Iterative search tried but found nothing
+- No errors or crashes
+
+---
+
+### Test 9.11: Filter Performance Under Low Selectivity
+
+**Category:** Filter Testing - Performance
+**Purpose:** Verify iterative fetching handles restrictive filters efficiently
+
+#### Setup Phase
+
+Create additional "noise" data (20+ reports) across various sessions/agents to simulate low selectivity scenario.
+
+#### Execution Phase
+
+**Search with Very Specific Filter:**
+```json
+{
+  "tool": "search_reports_specific_chunks",
+  "parameters": {
+    "query": "performance",
+    "session_id": "filter-session-001",
+    "agent_id": "agent-alpha",
+    "session_iter": 1,
+    "limit": 5
+  }
+}
+```
+
+#### Validation Phase
+
+**Log Analysis:**
+1. Check for: "Iterative search performance" log entry
+2. Verify: `fetched` >> `kept` (e.g., fetched=250, kept=5)
+3. Verify: `batches` > 1 (multiple iterations needed)
+4. Verify: Total elapsed < 2 seconds
+
+**Expected Log:**
+```
+Iterative search performance: elapsed=0.856s, fetched=250, kept=5, target=5, batches=3
+Batch passed filters: 2/100 (2.0%)
+```
+
+**Performance Checks:**
+1. Search completes successfully despite low selectivity
+2. Iterative batching kicks in (adaptive growth)
+3. No timeout errors
+4. Final result count matches limit (5)
+
+---
+
+### Test 9.12: Filter Across All Granularities
+
+**Category:** Filter Testing - Granularity Consistency
+**Purpose:** Verify filters work consistently across FINE, MEDIUM, COARSE
+
+#### Execution Phase
+
+**FINE Granularity:**
+```json
+{
+  "tool": "search_reports_specific_chunks",
+  "parameters": {
+    "query": "performance analysis",
+    "session_id": "filter-session-001",
+    "agent_id": "agent-alpha",
+    "limit": 10
+  }
+}
+```
+Expected: Returns chunks from A1, A2
+
+**MEDIUM Granularity:**
+```json
+{
+  "tool": "search_reports_section_context",
+  "parameters": {
+    "query": "performance analysis",
+    "session_id": "filter-session-001",
+    "agent_id": "agent-alpha",
+    "limit": 5
+  }
+}
+```
+Expected: Returns sections from A1, A2
+
+**COARSE Granularity:**
+```json
+{
+  "tool": "search_reports_full_documents",
+  "parameters": {
+    "query": "performance analysis",
+    "session_id": "filter-session-001",
+    "agent_id": "agent-alpha",
+    "limit": 3
+  }
+}
+```
+Expected: Returns full documents A1, A2
+
+#### Validation Phase
+
+**Validation Checks:**
+1. All three granularities respect the same filters
+2. FINE returns chunks, MEDIUM returns sections, COARSE returns docs
+3. Same memory_ids appear across all granularities
+4. Filter behavior is consistent regardless of granularity
+
+---
+
+### Test 9.13: Filter with Working Memory
+
+**Category:** Filter Testing - Memory Type Consistency
+**Purpose:** Verify filters work for working_memory (not just reports)
+
+#### Setup Phase
+
+**Store Working Memory:**
+```json
+{
+  "tool": "store_working_memory",
+  "parameters": {
+    "agent_id": "agent-alpha",
+    "session_id": "filter-session-001",
+    "session_iter": "v1",
+    "task_code": "task-A",
+    "content": "Working notes about database optimization for session 001"
+  }
+}
+```
+
+#### Execution Phase
+
+**Search with Filters:**
+```json
+{
+  "tool": "search_working_memory_specific_chunks",
+  "parameters": {
+    "query": "database optimization",
+    "session_id": "filter-session-001",
+    "agent_id": "agent-alpha",
+    "limit": 10
+  }
+}
+```
+
+#### Validation Phase
+
+**Validation Checks:**
+1. Returns working_memory item
+2. Filters apply to working_memory same as reports
+3. `memory_type` in results is "working_memory"
+
+---
+
+### Test 9.14: Null/Missing Filter Parameters
+
+**Category:** Filter Testing - Optional Parameters
+**Purpose:** Verify search works when filter parameters are omitted
+
+#### Execution Phase
+
+**No Filters (Search All):**
+```json
+{
+  "tool": "search_reports_specific_chunks",
+  "parameters": {
+    "query": "performance analysis",
+    "limit": 20
+  }
+}
+```
+
+#### Validation Phase
+
+**Expected Results:**
+- Should return: ALL reports (A1, A2, B1, C1, D1, plus any others)
+- No filtering applied
+
+**Validation Checks:**
+1. `total_results` >= 5 (all test data)
+2. Results include multiple sessions
+3. Results include multiple agents
+4. No implicit filtering occurred
+
+---
+
+### Test 9.15: Filter Edge Case - Empty String vs Null
+
+**Category:** Filter Testing - Edge Cases
+**Purpose:** Verify empty string handled correctly vs null
+
+#### Execution Phase
+
+**Empty String Filter (if API allows):**
+```json
+{
+  "tool": "search_reports_specific_chunks",
+  "parameters": {
+    "query": "performance analysis",
+    "session_id": "",
+    "limit": 10
+  }
+}
+```
+
+#### Validation Phase
+
+**Expected Behavior:**
+- Option A: Empty string treated as "no filter" (returns all)
+- Option B: Empty string treated as invalid (returns error or zero results)
+
+**Validation Checks:**
+1. Behavior is consistent and documented
+2. No crashes or exceptions
+3. Error message clear if rejected
+
+---
+
+## Filter Testing Summary
+
+### Success Criteria
+
+All filter tests pass if:
+
+1. **Filter Isolation:** Each filter (session_id, agent_id, session_iter, task_code) correctly restricts results
+2. **Type Compatibility:** Integer and string formats for session_iter work interchangeably
+3. **Combination Logic:** Multiple filters combine with AND logic (not OR)
+4. **Performance:** Low selectivity scenarios handled efficiently with iterative batching
+5. **Consistency:** Filters work identically across all granularities (FINE/MEDIUM/COARSE)
+6. **Memory Type Agnostic:** Filters apply to reports, working_memory, etc. uniformly
+
+### Critical Bug Validation
+
+**Before Fix:** Test 9.4 (session_iter filter) should FAIL with 0 results despite data existing.
+
+**After Fix:** Test 9.4 returns expected results (A1, B1, C1, D1) confirming type normalization works.
+
+**Log Evidence:**
+- Pre-fix: "Batch passed filters: 0/N (0.0%)"
+- Post-fix: "Batch passed filters: M/N (X%)" where X > 0
+
+---
+
+## 10. Edge Case and Error Tests
+
+### Test 10.1: Empty Content
 
 **Category:** Edge Case - Empty Input
 **Purpose:** Handle empty string gracefully
@@ -2241,7 +2994,7 @@ Record: `DELETE_TEST_ID = <memory_id>`
   "parameters": {
     "agent_id": "test-agent-alpha",
     "session_id": "test-session-001",
-    "content": "Test with émojis = <‰ and spëcial çhars: -‡, 'D91(J), å,ž",
+    "content": "Test with ï¿½mojis = <ï¿½ and spï¿½cial ï¿½hars: -ï¿½, 'D91(J), ï¿½,ï¿½",
     "task_code": "task-unicode"
   }
 }
@@ -2260,7 +3013,7 @@ Record: `DELETE_TEST_ID = <memory_id>`
 {
   "tool": "search_reports_full_documents",
   "parameters": {
-    "query": "émojis = ",
+    "query": "ï¿½mojis = ",
     "session_id": "test-session-001",
     "limit": 1
   }
@@ -2664,7 +3417,7 @@ A test fails if ANY of the following occur:
    - Chunk boundaries corrupt sentences
 
 5. **Performance Failures:**
-   - Operations exceed 3× expected time
+   - Operations exceed 3ï¿½ expected time
    - Timeouts occur
    - Memory leaks detected (increasing memory over time)
    - Database locks persist
@@ -2788,7 +3541,7 @@ Log: "Generated 18 chunk embeddings"
 - Check: Embedding model available
 
 **Problem: Chunking creates too few/many chunks**
-- Check: Content length (< 450 tokens ’ no chunking)
+- Check: Content length (< 450 tokens ï¿½ no chunking)
 - Verify: Chunk size config (default 450 tokens)
 - Review: Markdown structure (headers affect chunking)
 

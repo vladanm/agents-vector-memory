@@ -971,6 +971,40 @@ class SessionMemoryStore:
     # TASK 2: ITERATIVE POST-FILTER FETCHING HELPER METHODS
     # ======================
 
+    def _normalize_session_iter(self, value: str | int | None) -> int:
+        """
+        Normalize session_iter to integer for comparison.
+
+        Converts string "v1" -> 1, "v2" -> 2, etc.
+        Handles None as default iteration 1.
+
+        Args:
+            value: session_iter as string ("v1"), integer (1), or None
+
+        Returns:
+            Integer iteration number
+        """
+        if value is None:
+            return 1
+
+        if isinstance(value, int):
+            return value
+
+        if isinstance(value, str):
+            # Handle "v1" -> 1, "v2" -> 2 format
+            if value.startswith('v'):
+                try:
+                    return int(value[1:])
+                except (ValueError, IndexError):
+                    return 1
+            # Handle plain string "1" -> 1
+            try:
+                return int(value)
+            except ValueError:
+                return 1
+
+        return 1
+
     def _passes_metadata_filters(self, row: tuple, filters: dict) -> bool:
         """
         Check if row passes all metadata filters.
@@ -990,8 +1024,14 @@ class SessionMemoryStore:
             return False
         if filters.get("session_id") and row[10] != filters["session_id"]:
             return False
-        if filters.get("session_iter") is not None and row[11] != filters["session_iter"]:
-            return False
+
+        # FIX: Normalize session_iter for type-safe comparison
+        if filters.get("session_iter") is not None:
+            row_iter = self._normalize_session_iter(row[11])
+            filter_iter = self._normalize_session_iter(filters["session_iter"])
+            if row_iter != filter_iter:
+                return False
+
         if filters.get("task_code") and row[12] != filters["task_code"]:
             return False
 
