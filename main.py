@@ -166,12 +166,34 @@ def store_session_context(
     session_id: str,
     session_iter: str,
     content: str,
-    task_code: str | None = None
+    task_code: str | None = None,
+    title: str | None = None,
+    description: str | None = None,
+    tags: list[str] | None = None,
+    metadata: dict | None = None
 ) -> StoreMemoryResult:
     """
     Store session context memory (main orchestrator only).
     Session context represents compressed user input and session state.
+
+    Args:
+        session_id: Unique session identifier
+        session_iter: Session iteration number
+        content: The memory content to store
+        task_code: Optional task identifier
+        title: Optional title for the memory
+        description: Optional description
+        tags: Optional list of tags for categorization
+        metadata: Optional additional metadata (merged with default scope="session")
+
+    Returns:
+        StoreMemoryResult with memory_id, success status, and details
     """
+    # Merge metadata to preserve backward compatibility with "scope" field
+    merged_metadata = {"scope": "session"}
+    if metadata:
+        merged_metadata.update(metadata)
+
     result = store.store_memory(
         agent_id="main-orchestrator",  # Fixed for session context
         memory_type="session_context",
@@ -179,7 +201,10 @@ def store_session_context(
         session_id=session_id,
         session_iter=session_iter,
         task_code=task_code,
-        metadata={"scope": "session"}
+        title=title,
+        description=description,
+        tags=tags,
+        metadata=merged_metadata
     )
     return result
 
@@ -189,12 +214,34 @@ def store_input_prompt(
     session_id: str,
     session_iter: str,
     content: str,
-    task_code: str | None = None
+    task_code: str | None = None,
+    title: str | None = None,
+    description: str | None = None,
+    tags: list[str] | None = None,
+    metadata: dict | None = None
 ) -> StoreMemoryResult:
     """
     Store original user input prompt to prevent loss.
     Input prompts are stored verbatim for reference.
+
+    Args:
+        session_id: Unique session identifier
+        session_iter: Session iteration number
+        content: The original prompt text
+        task_code: Optional task identifier
+        title: Optional title for the memory entry
+        description: Optional brief description
+        tags: Optional list of tags for categorization
+        metadata: Optional additional metadata (merged with default scope="input")
+
+    Returns:
+        StoreMemoryResult with memory_id, success status, and details
     """
+    # Merge metadata to preserve backward compatibility with "scope" field
+    merged_metadata = {"scope": "input"}
+    if metadata:
+        merged_metadata.update(metadata)
+
     result = store.store_memory(
         agent_id="main-orchestrator",
         memory_type="input_prompt",
@@ -202,7 +249,10 @@ def store_input_prompt(
         session_id=session_id,
         session_iter=session_iter,
         task_code=task_code,
-        metadata={"scope": "input"}
+        title=title,
+        description=description,
+        tags=tags,
+        metadata=merged_metadata
     )
     return result
 
@@ -213,12 +263,35 @@ def store_system_memory(
     session_id: str,
     content: str,
     session_iter: str | None = None,
-    task_code: str | None = None
+    task_code: str | None = None,
+    title: str | None = None,
+    description: str | None = None,
+    tags: list[str] | None = None,
+    metadata: dict | None = None
 ) -> StoreMemoryResult:
     """
     Store system-level memory (configs, commands, scripts).
     System memory contains technical details for task execution.
+
+    Args:
+        agent_id: Agent identifier
+        session_id: Session identifier
+        content: The memory content to store
+        session_iter: Optional session iteration
+        task_code: Optional task identifier
+        title: Optional title for the memory
+        description: Optional description
+        tags: Optional list of tags for categorization
+        metadata: Optional additional metadata (merged with default scope="system")
+
+    Returns:
+        StoreMemoryResult with memory_id, success status, and details
     """
+    # Merge metadata to preserve backward compatibility with "scope" field
+    merged_metadata = {"scope": "system"}
+    if metadata:
+        merged_metadata.update(metadata)
+
     result = store.store_memory(
         agent_id=agent_id,
         memory_type="system_memory",
@@ -226,7 +299,10 @@ def store_system_memory(
         session_id=session_id,
         session_iter=session_iter,
         task_code=task_code,
-        metadata={"scope": "system"}
+        title=title,
+        description=description,
+        tags=tags,
+        metadata=merged_metadata
     )
     return result
 
@@ -237,12 +313,35 @@ def store_report(
     session_id: str,
     content: str,
     session_iter: str | None = None,
-    task_code: str | None = None
+    task_code: str | None = None,
+    title: str | None = None,
+    description: str | None = None,
+    tags: list[str] | None = None,
+    metadata: dict | None = None
 ) -> StoreMemoryResult:
     """
     Store agent report memory.
     Reports contain analysis findings and results from agent tasks.
+
+    Args:
+        agent_id: Agent identifier
+        session_id: Session identifier
+        content: The report content to store
+        session_iter: Optional session iteration
+        task_code: Optional task identifier
+        title: Optional title for the report
+        description: Optional description
+        tags: Optional list of tags for categorization
+        metadata: Optional additional metadata (merged with default scope="report")
+
+    Returns:
+        StoreMemoryResult with memory_id, success status, and details
     """
+    # Merge metadata to preserve backward compatibility with "scope" field
+    merged_metadata = {"scope": "report"}
+    if metadata:
+        merged_metadata.update(metadata)
+
     result = store.store_memory(
         agent_id=agent_id,
         memory_type="reports",
@@ -250,7 +349,10 @@ def store_report(
         session_id=session_id,
         session_iter=session_iter,
         task_code=task_code,
-        metadata={"scope": "report"}
+        title=title,
+        description=description,
+        tags=tags,
+        metadata=merged_metadata
     )
     return result
 
@@ -261,12 +363,39 @@ def store_report_observation(
     session_id: str,
     content: str,
     session_iter: str | None = None,
-    task_code: str | None = None
+    task_code: str | None = None,
+    parent_report_id: str | None = None,
+    title: str | None = None,
+    description: str | None = None,
+    tags: list[str] | None = None,
+    metadata: dict | None = None
 ) -> StoreMemoryResult:
     """
     Store additional observations about existing reports.
     Use this to add notes or updates to previously generated reports.
+
+    Args:
+        agent_id: Agent identifier
+        session_id: Session identifier
+        content: The observation content
+        session_iter: Optional session iteration
+        task_code: Optional task identifier
+        parent_report_id: Optional parent report ID to link this observation to
+        title: Optional title for the observation
+        description: Optional description
+        tags: Optional list of tags for categorization
+        metadata: Optional additional metadata (merged with default scope="observation")
+
+    Returns:
+        StoreMemoryResult with memory_id, success status, and details
     """
+    # Merge metadata with parent_report_id if provided
+    merged_metadata = {"scope": "observation"}
+    if parent_report_id:
+        merged_metadata["parent_report_id"] = parent_report_id
+    if metadata:
+        merged_metadata.update(metadata)
+
     result = store.store_memory(
         agent_id=agent_id,
         memory_type="report_observations",
@@ -274,7 +403,10 @@ def store_report_observation(
         session_id=session_id,
         session_iter=session_iter,
         task_code=task_code,
-        metadata={"scope": "observation"}
+        title=title,
+        description=description,
+        tags=tags,
+        metadata=merged_metadata
     )
     return result
 
@@ -285,13 +417,37 @@ def store_working_memory(
     session_id: str,
     content: str,
     session_iter: str | None = None,
-    task_code: str | None = None
+    task_code: str | None = None,
+    title: str | None = None,
+    description: str | None = None,
+    tags: list[str] | None = None,
+    metadata: dict | None = None
 ) -> StoreMemoryResult:
     """
     Store working memory during task execution.
     Working memory captures important intermediate findings and context.
+
+    Args:
+        agent_id: Agent identifier
+        session_id: Session identifier
+        content: The working memory content
+        session_iter: Optional session iteration
+        task_code: Optional task identifier
+        title: Optional title for the memory
+        description: Optional description
+        tags: Optional list of tags for categorization
+        metadata: Optional additional metadata (merged with default scope="working")
+
+    Returns:
+        StoreMemoryResult with memory_id, success status, and details
     """
     logger.info(f"[store_working_memory] agent={agent_id}, task={task_code}")
+
+    # Merge metadata to preserve backward compatibility with "scope" field
+    merged_metadata = {"scope": "working"}
+    if metadata:
+        merged_metadata.update(metadata)
+
     result = store.store_memory(
         agent_id=agent_id,
         memory_type="working_memory",
@@ -299,7 +455,10 @@ def store_working_memory(
         session_id=session_id,
         session_iter=session_iter,
         task_code=task_code,
-        metadata={"scope": "working"}
+        title=title,
+        description=description,
+        tags=tags,
+        metadata=merged_metadata
     )
     return result
 
@@ -309,12 +468,35 @@ def store_knowledge_base(
     agent_id: str,
     title: str,
     content: str,
-    category: str | None = None
+    category: str | None = None,
+    description: str | None = None,
+    tags: list[str] | None = None,
+    metadata: dict | None = None
 ) -> StoreMemoryResult:
     """
     Store knowledge base entry (not session-scoped).
     Knowledge base contains persistent information across sessions.
+
+    Args:
+        agent_id: Agent identifier
+        title: Title for the knowledge base entry (required)
+        content: The knowledge base content
+        category: Optional category for organization (default: "general")
+        description: Optional brief description
+        tags: Optional list of tags for categorization
+        metadata: Optional additional metadata (will be merged with title and category)
+
+    Returns:
+        StoreMemoryResult with success status and memory details
     """
+    # Merge metadata - keep title and category for backward compatibility
+    merged_metadata = {
+        "title": title,
+        "category": category or "general"
+    }
+    if metadata:
+        merged_metadata.update(metadata)
+
     result = store.store_memory(
         agent_id=agent_id,
         memory_type="knowledge_base",
@@ -322,7 +504,10 @@ def store_knowledge_base(
         session_id=None,
         session_iter=None,
         task_code=None,
-        metadata={"title": title, "category": category or "general"}
+        title=title,
+        description=description,
+        tags=tags,
+        metadata=merged_metadata
     )
     return result
 
