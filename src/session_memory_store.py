@@ -1189,35 +1189,214 @@ class SessionMemoryStore:
         search_start = time.time()
 
         if granularity == "coarse":
-            # Return full documents - scoped search without embeddings
-            result = self.search_memories(
-                memory_type=memory_type,
-                agent_id=agent_id,
-                session_id=session_id,
-                session_iter=session_iter,
-                task_code=task_code,
-                query=query,
-                limit=limit
-            )
-            result["granularity"] = "coarse"
+            # COARSE GRANULARITY: Full document search via chunk aggregation
+            logger.info("=" * 80)
+            logger.info("COARSE GRANULARITY SEARCH STARTING (CHUNK AGGREGATION STRATEGY)")
+            logger.info(f"  memory_type: {memory_type}")
+            logger.info(f"  query: {query[:100]}...")
+            logger.info(f"  agent_id: {agent_id}")
+            logger.info(f"  session_id: {session_id}")
+            logger.info(f"  session_iter: {session_iter}")
+            logger.info(f"  task_code: {task_code}")
+            logger.info(f"  limit: {limit} documents")
+            logger.info("=" * 80)
 
-            # Record statistics
-            elapsed = time.time() - search_start
-            self.search_stats.record_query(
-                f"search_coarse_{memory_type}",
-                elapsed,
-                len(result.get("results", [])),
-                {
-                    "memory_type": memory_type,
-                    "filters": {
-                        "agent_id": agent_id,
-                        "session_id": session_id,
-                        "task_code": task_code
+            try:
+                # Check embedding model
+                model = self.embedding_model
+                if model is None:
+                    return {
+                        "success": True,
+                        "results": [],
+                        "total_results": 0,
+                        "granularity": "coarse",
+                        "message": "Embedding model not available",
+                        "error": None
                     }
-                }
-            )
 
-            return result
+                # Step 1: Get many fine-grained chunks (20x requested documents)
+                chunk_fetch_limit = limit * 20
+                logger.info(f"Step 1: Fetching {chunk_fetch_limit} fine-grained chunks")
+
+                # Generate query embedding
+                query_embedding = model.encode([query], show_progress_bar=False)[0]
+                query_bytes = query_embedding.tobytes()
+
+                conn = self._get_connection()
+
+                # Build metadata filters dict
+                metadata_filters = {
+                    "memory_type": memory_type,
+                    "agent_id": agent_id,
+                    "session_id": session_id,
+                    "session_iter": session_iter,
+                    "task_code": task_code
+                }
+
+                # Fetch fine-grained chunks with iterative search
+                chunk_rows = self._iterative_vector_search(
+                    conn, query_bytes, chunk_fetch_limit, metadata_filters
+                )
+
+                logger.info(f"  → Retrieved {len(chunk_rows)} chunks after filtering")
+
+                if not chunk_rows:
+                    conn.close()
+                    logger.info("No chunks found matching filters")
+                    return {
+                        "success": True,
+                        "results": [],
+                        "total_results": 0,
+                        "granularity": "coarse",
+                        "message": "No matching chunks found",
+                        "error": None
+                    }
+
+                # Step 2: Aggregate chunks by parent document (memory_id)
+                logger.info("Step 2: Aggregating chunks by document")
+                doc_chunks = {}  # memory_id -> list of (chunk_id, distance, content)
+
+                for row in chunk_rows:
+                    chunk_id = row[0]
+                    memory_id = row[1]
+                    content = row[3]
+                    distance = row[7]
+
+                    if memory_id not in doc_chunks:
+                        doc_chunks[memory_id] = []
+                    doc_chunks[memory_id].append((chunk_id, distance, content))
+
+                logger.info(f"  → Found {len(doc_chunks)} unique documents")
+
+                # Step 3: Rank documents by best chunk similarity
+                logger.info("Step 3: Ranking documents by best chunk similarity")
+                doc_scores = []
+
+                for memory_id, chunks in doc_chunks.items():
+                    # Best similarity = lowest distance
+                    best_distance = min(c[1] for c in chunks)
+                    best_similarity = 1.0 - (best_distance**2 / 2.0)
+                    matching_chunks = len(chunks)
+
+                    doc_scores.append({
+                        "memory_id": memory_id,
+                        "best_similarity": best_similarity,
+                        "best_distance": best_distance,
+                        "matching_chunks": matching_chunks,
+                        "chunk_details": chunks
+                    })
+
+                # Sort by best similarity (highest first)
+                doc_scores.sort(key=lambda x: x["best_similarity"], reverse=True)
+                logger.info(f"  → Top document similarity: {doc_scores[0]['best_similarity']:.4f}")
+
+                # Step 4: Fetch full document content for top N documents
+                top_docs = doc_scores[:limit]
+                logger.info(f"Step 4: Fetching full content for top {len(top_docs)} documents")
+
+                results = []
+                for doc_score in top_docs:
+                    memory_id = doc_score["memory_id"]
+
+                    # Get full document metadata
+                    doc_row = conn.execute("""
+                        SELECT id, memory_type, agent_id, session_id, session_iter,
+                               task_code, content, title, description, tags, metadata,
+                               content_hash, created_at, updated_at
+                        FROM session_memories
+                        WHERE id = ?
+                    """, (memory_id,)).fetchone()
+
+                    if not doc_row:
+                        continue
+
+                    # Get all chunks for this document (ordered by chunk_index)
+                    all_chunks = conn.execute("""
+                        SELECT chunk_index, content, chunk_type, header_path
+                        FROM memory_chunks
+                        WHERE parent_id = ?
+                        ORDER BY chunk_index ASC
+                    """, (memory_id,)).fetchall()
+
+                    # Build full document content from chunks
+                    full_content = "\n\n".join([c[1] for c in all_chunks])
+
+                    results.append({
+                        "memory_id": doc_row[0],
+                        "memory_type": doc_row[1],
+                        "agent_id": doc_row[2],
+                        "session_id": doc_row[3],
+                        "session_iter": doc_row[4],
+                        "task_code": doc_row[5],
+                        "content": full_content,
+                        "title": doc_row[7],
+                        "description": doc_row[8],
+                        "tags": json.loads(doc_row[9]) if doc_row[9] else [],
+                        "metadata": json.loads(doc_row[10]) if doc_row[10] else {},
+                        "content_hash": doc_row[11],
+                        "created_at": doc_row[12],
+                        "updated_at": doc_row[13],
+                        "similarity": float(doc_score["best_similarity"]),
+                        "matching_chunks": doc_score["matching_chunks"],
+                        "total_chunks": len(all_chunks),
+                        "source": "full_document",
+                        "granularity": "coarse"
+                    })
+
+                conn.close()
+
+                logger.info("=" * 80)
+                logger.info("COARSE GRANULARITY RESULTS:")
+                logger.info(f"  Total documents returned: {len(results)}")
+                if results:
+                    logger.info(f"  Best similarity: {results[0]['similarity']:.4f}")
+                    logger.info(f"  Best document: {results[0]['title'] or 'Untitled'}")
+                    logger.info(f"  Matching chunks: {results[0]['matching_chunks']}/{results[0]['total_chunks']}")
+                logger.info("=" * 80)
+
+                # Record statistics
+                elapsed = time.time() - search_start
+                self.search_stats.record_query(
+                    f"search_coarse_{memory_type}",
+                    elapsed,
+                    len(results),
+                    {
+                        "memory_type": memory_type,
+                        "filters": metadata_filters,
+                        "chunk_fetch_limit": chunk_fetch_limit,
+                        "documents_found": len(doc_chunks)
+                    }
+                )
+
+                return {
+                    "success": True,
+                    "results": results,
+                    "total_results": len(results),
+                    "granularity": "coarse",
+                    "message": None,
+                    "error": None
+                }
+
+            except Exception as e:
+                elapsed = time.time() - search_start
+                logger.error(f"Coarse granularity search failed after {elapsed:.3f}s: {e}", exc_info=True)
+
+                # Record failed query in stats
+                self.search_stats.record_query(
+                    f"search_coarse_{memory_type}_FAILED",
+                    elapsed,
+                    0,
+                    {"error": str(e)}
+                )
+
+                return {
+                    "success": False,
+                    "results": [],
+                    "total_results": 0,
+                    "granularity": "coarse",
+                    "message": str(e),
+                    "error": "Search failed"
+                }
 
         elif granularity == "fine":
             # Return individual chunks using vector search with TASK 2 iterative fetching
