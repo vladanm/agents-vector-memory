@@ -166,6 +166,7 @@ def store_session_context(
     session_id: str,
     session_iter: str,
     content: str,
+    agent_id: str = "main-orchestrator",
     task_code: str | None = None,
     title: str | None = None,
     description: str | None = None,
@@ -173,13 +174,14 @@ def store_session_context(
     metadata: dict | None = None
 ) -> StoreMemoryResult:
     """
-    Store session context memory (main orchestrator only).
+    Store session context memory.
     Session context represents compressed user input and session state.
 
     Args:
         session_id: Unique session identifier
         session_iter: Session iteration number
         content: The memory content to store
+        agent_id: Agent identifier (default: "main-orchestrator")
         task_code: Optional task identifier
         title: Optional title for the memory
         description: Optional description
@@ -195,7 +197,7 @@ def store_session_context(
         merged_metadata.update(metadata)
 
     result = store.store_memory(
-        agent_id="main-orchestrator",  # Fixed for session context
+        agent_id=agent_id,  # USE PARAMETER (defaults to "main-orchestrator")
         memory_type="session_context",
         content=content,
         session_id=session_id,
@@ -211,6 +213,7 @@ def store_session_context(
 
 @mcp.tool()
 def store_input_prompt(
+    agent_id: str,
     session_id: str,
     session_iter: str,
     content: str,
@@ -225,6 +228,7 @@ def store_input_prompt(
     Input prompts are stored verbatim for reference.
 
     Args:
+        agent_id: Agent identifier (which agent is storing this prompt)
         session_id: Unique session identifier
         session_iter: Session iteration number
         content: The original prompt text
@@ -243,7 +247,7 @@ def store_input_prompt(
         merged_metadata.update(metadata)
 
     result = store.store_memory(
-        agent_id="main-orchestrator",
+        agent_id=agent_id,
         memory_type="input_prompt",
         content=content,
         session_id=session_id,
@@ -519,15 +523,25 @@ def store_knowledge_base(
 @mcp.tool()
 def search_session_context(
     session_id: str,
+    agent_id: str | None = None,
     session_iter: str | None = None,
     limit: int = 5
 ) -> SearchMemoriesResult:
     """
-    Search session context memories (main orchestrator).
+    Search session context memories.
     Returns session context snapshots for continuity.
+
+    Args:
+        session_id: Session identifier to filter by
+        agent_id: Optional agent identifier to filter by (None = all agents, defaults to None)
+        session_iter: Optional session iteration to filter by
+        limit: Maximum number of results (default: 5)
+
+    Returns:
+        SearchMemoriesResult with matching session context memories
     """
     result = store.search_memories(
-        agent_id="main-orchestrator",
+        agent_id=agent_id,  # None = all agents
         memory_type="session_context",
         query=None,
         session_id=session_id,
@@ -540,15 +554,25 @@ def search_session_context(
 @mcp.tool()
 def search_input_prompts(
     session_id: str,
+    agent_id: str | None = None,
     session_iter: str | None = None,
     limit: int = 5
 ) -> SearchMemoriesResult:
     """
     Search input prompt memories.
     Returns original user prompts for reference.
+
+    Args:
+        session_id: Session identifier to filter by
+        agent_id: Optional agent identifier to filter by (None = all agents)
+        session_iter: Optional session iteration to filter by
+        limit: Maximum number of results (default: 5)
+
+    Returns:
+        SearchMemoriesResult with matching input prompt memories
     """
     result = store.search_memories(
-        agent_id="main-orchestrator",
+        agent_id=agent_id,
         memory_type="input_prompt",
         query=None,
         session_id=session_id,
@@ -863,7 +887,22 @@ def reconstruct_document(memory_id: str) -> ReconstructDocumentResult:
     Reconstruct the full document from a memory_id by retrieving all its chunks.
     Returns the complete original document.
     """
-    result = store.reconstruct_document(memory_id=memory_id)
+    # Convert memory_id from string to int
+    try:
+        memory_id_int = int(memory_id)
+    except (ValueError, TypeError):
+        return {
+            "success": False,
+            "memory_id": None,
+            "content": None,
+            "title": None,
+            "memory_type": None,
+            "chunk_count": 0,
+            "error": "Invalid memory_id",
+            "message": f"memory_id must be a valid integer, got: {memory_id}"
+        }
+
+    result = store.reconstruct_document(memory_id=memory_id_int)
     return result
 
 
@@ -873,7 +912,18 @@ def get_memory_by_id(memory_id: str) -> GetMemoryResult:
     Get a specific memory by its ID.
     Returns complete memory record with metadata.
     """
-    result = store.get_memory_by_id(memory_id=memory_id)
+    # Convert memory_id from string to int
+    try:
+        memory_id_int = int(memory_id)
+    except (ValueError, TypeError):
+        return {
+            "success": False,
+            "memory": None,
+            "error": "Invalid memory_id",
+            "message": f"memory_id must be a valid integer, got: {memory_id}"
+        }
+
+    result = store.get_memory_by_id(memory_id=memory_id_int)
     return result
 
 
@@ -909,8 +959,25 @@ def write_document_to_file(
     Write a reconstructed document to a file.
     Use this for large documents that exceed token limits.
     """
+    # Convert memory_id from string to int
+    try:
+        memory_id_int = int(memory_id)
+    except (ValueError, TypeError):
+        return {
+            "success": False,
+            "file_path": None,
+            "file_size_bytes": None,
+            "file_size_human": None,
+            "estimated_tokens": None,
+            "memory_id": None,
+            "created_at": None,
+            "message": f"memory_id must be a valid integer, got: {memory_id}",
+            "error_code": "INVALID_PARAMETER",
+            "error_message": "Invalid memory_id parameter"
+        }
+
     result = store.write_document_to_file(
-        memory_id=memory_id,
+        memory_id=memory_id_int,
         output_path=output_path
     )
     return result
@@ -922,7 +989,18 @@ def delete_memory(memory_id: str) -> DeleteMemoryResult:
     Delete a memory and all its chunks.
     Use with caution - this cannot be undone.
     """
-    result = store.delete_memory(memory_id=memory_id)
+    # Convert memory_id from string to int
+    try:
+        memory_id_int = int(memory_id)
+    except (ValueError, TypeError):
+        return {
+            "success": False,
+            "memory_id": None,
+            "message": f"memory_id must be a valid integer, got: {memory_id}",
+            "error": "Invalid memory_id"
+        }
+
+    result = store.delete_memory(memory_id=memory_id_int)
     return result
 
 

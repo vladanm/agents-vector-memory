@@ -2089,23 +2089,39 @@ class SessionMemoryStore:
             with open(output_path, 'w', encoding='utf-8') as f:
                 f.write('\n'.join(content_parts))
 
+            # Calculate file size
+            file_size_bytes = len('\n'.join(content_parts).encode('utf-8'))
+            file_size_mb = file_size_bytes / (1024 * 1024)
+            file_size_human = f"{file_size_mb:.2f} MB" if file_size_mb >= 1 else f"{file_size_bytes / 1024:.2f} KB"
+
+            # Estimate tokens
+            estimated_tokens = self.count_tokens('\n'.join(content_parts)) if hasattr(self, 'count_tokens') else None
+
             return {
                 "success": True,
                 "file_path": output_path,
+                "file_size_bytes": file_size_bytes,
+                "file_size_human": file_size_human,
+                "estimated_tokens": estimated_tokens,
                 "memory_id": memory_id,
-                "bytes_written": len('\n'.join(content_parts).encode('utf-8')),
+                "created_at": doc.get("created_at"),
                 "message": f"Document written to {output_path}",
-                "error": None
+                "error_code": None,
+                "error_message": None
             }
 
         except Exception as e:
             return {
                 "success": False,
                 "file_path": None,
+                "file_size_bytes": None,
+                "file_size_human": None,
+                "estimated_tokens": None,
                 "memory_id": None,
-                "bytes_written": 0,
-                "error": "Write failed",
-                "message": str(e)
+                "created_at": None,
+                "message": str(e),
+                "error_code": "WRITE_FAILED",
+                "error_message": str(e)
             }
 
     def _get_session_stats_impl(self, agent_id: str | None, session_id: str | None) -> dict[str, Any]:
