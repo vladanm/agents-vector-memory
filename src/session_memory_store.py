@@ -1037,6 +1037,44 @@ class SessionMemoryStore:
 
         return True
 
+    def _enrich_results_with_parent_metadata(self, conn: sqlite3.Connection, results: list) -> None:
+        """
+        Enrich search results with tags and metadata from parent memories.
+        Modifies results list in-place by adding 'tags' and 'metadata' fields.
+
+        Args:
+            conn: Database connection
+            results: List of result dicts with 'memory_id' field
+        """
+        if not results:
+            return
+
+        # Get unique memory_ids
+        memory_ids = list(set([r["memory_id"] for r in results]))
+
+        # Batch fetch tags and metadata for all memory_ids
+        placeholders = ','.join('?' * len(memory_ids))
+        rows = conn.execute(f"""
+            SELECT id, tags, metadata
+            FROM session_memories
+            WHERE id IN ({placeholders})
+        """, memory_ids).fetchall()
+
+        # Build lookup dict
+        metadata_lookup = {}
+        for row in rows:
+            metadata_lookup[row[0]] = {
+                "tags": json.loads(row[1]) if row[1] else [],
+                "metadata": json.loads(row[2]) if row[2] else {}
+            }
+
+        # Enrich results in-place
+        for result in results:
+            mid = result["memory_id"]
+            if mid in metadata_lookup:
+                result["tags"] = metadata_lookup[mid]["tags"]
+                result["metadata"] = metadata_lookup[mid]["metadata"]
+
     def _iterative_vector_search(
         self,
         conn: sqlite3.Connection,
@@ -1443,8 +1481,6 @@ class SessionMemoryStore:
                 # Use iterative search to handle low selectivity filters
                 rows = self._iterative_vector_search(conn, query_bytes, limit, metadata_filters)
 
-                conn.close()
-
                 logger.info(f"Iterative search returned {len(rows)} filtered chunks")
 
                 # Convert rows to results (no more filtering needed - already done in iterative search)
@@ -1465,6 +1501,11 @@ class SessionMemoryStore:
                         "source": "chunk",
                         "granularity": "fine"
                     })
+
+                # Enrich results with parent memory tags and metadata
+                self._enrich_results_with_parent_metadata(conn, results)
+
+                conn.close()
 
                 logger.info("=" * 80)
                 logger.info("FINAL RESULTS:")
@@ -1620,6 +1661,9 @@ class SessionMemoryStore:
                         "source": "expanded_section",
                         "granularity": "medium"
                     })
+
+                # Enrich results with parent memory tags and metadata
+                self._enrich_results_with_parent_metadata(conn, section_results)
 
                 conn.close()
 
